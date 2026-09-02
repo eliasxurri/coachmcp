@@ -463,15 +463,59 @@ condicionales, como las que ya protegen al curado.
 
 ---
 
-## Despliegue
+## Despliegue desde cero
+
+### Requisitos
+
+- **Cuenta de AWS** con credenciales configuradas (`aws configure`). Todo
+  el pipeline cabe en el free tier; ver la sección de costos.
+- **Terraform** >= 1.5 y **AWS CLI v2**.
+- **Python 3.12** para el servidor MCP.
+- **Una API key de Riot**, en https://developer.riotgames.com. La
+  development key es gratis pero **expira cada 24 horas**; para un
+  despliegue permanente hace falta pedir una Personal API Key.
+
+Si usas un perfil de AWS con nombre, expórtalo una vez y todos los
+comandos de abajo lo tomarán:
+
+```bash
+export AWS_PROFILE=tu-perfil
+export AWS_REGION=sa-east-1
+```
+
+### 1. Configurar
+
+`tracked_summoners` no tiene default a propósito: es el único dato que
+identifica a una persona, y un default haría que quien clone el repo
+despliegue apuntando a la cuenta de otro.
 
 ```bash
 cd terraform
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Editar `terraform.tfvars` con el Riot ID propio, tal como aparece en el
+cliente del juego (`gameName#tagLine`). `terraform.tfvars` está en
+`.gitignore`, así que no se versiona.
+
+Quien juegue fuera de América debe ajustar también `riot_routing_region`
+(`americas`, `europe`, `asia` o `sea`).
+
+### 2. Desplegar
+
+```bash
 terraform init
 terraform apply
 ```
 
-Cargar la API key (no queda en el código ni en el state):
+Crea unos 40 recursos y tarda un par de minutos. El bucket lleva el ID
+de cuenta en el nombre porque S3 exige unicidad global.
+
+### 3. Cargar la API key
+
+Se carga aparte, nunca por Terraform: el state guarda todos los valores
+**en texto plano**, así que una key puesta en el código o en un `.tfvars`
+quedaría expuesta ahí.
 
 ```bash
 aws ssm put-parameter \
@@ -481,13 +525,33 @@ aws ssm put-parameter \
   --overwrite
 ```
 
-Probar la ingesta:
+Este es el comando a repetir cada vez que expire la development key.
+
+### 4. Verificar
 
 ```bash
-aws lambda invoke \
-  --function-name lol-pipeline-ingesta \
-    respuesta.json && cat respuesta.json
+aws lambda invoke --function-name lol-pipeline-ingesta respuesta.json \
+  && cat respuesta.json
 ```
+
+Debe responder con `total_ingeridas` mayor que cero. Si devuelve un error
+403, la API key expiró o no se cargó.
+
+A partir de acá EventBridge dispara la ingesta cada 30 minutos y el
+curado a Parquet en el mismo ciclo, sin intervención.
+
+### 5. Servidor MCP
+
+```bash
+cd ../mcp-server
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python test_estadistica.py    # verifica las pruebas estadísticas
+```
+
+`.mcp.json`, en la raíz del repo, registra el servidor para Claude Code.
+**Hay que ajustar `AWS_PROFILE` y `AWS_REGION`** a los propios; vienen con
+los valores del despliegue original.
 
 ### Backfill histórico
 
@@ -496,11 +560,10 @@ traer historia anterior, se invoca manualmente una página de hasta 80 partidas
 para uno de los jugadores definidos en `tracked_summoners`:
 
 ```bash
-AWS_PROFILE=portfolio aws lambda invoke \
+aws lambda invoke \
   --function-name lol-pipeline-ingesta \
-  --region sa-east-1 \
   --cli-binary-format raw-in-base64-out \
-  --payload '{"mode":"backfill","player":"Elias#000","start":0,"count":80}' \
+  --payload '{"mode":"backfill","player":"TuNombre#TAG","start":0,"count":80}' \
   /tmp/backfill.json
 ```
 
@@ -513,16 +576,27 @@ Después de la última página se cura la ventana histórica. Por ejemplo, para
 un año:
 
 ```bash
-AWS_PROFILE=portfolio aws lambda invoke \
+aws lambda invoke \
   --function-name lol-pipeline-curado \
-  --region sa-east-1 \
   --cli-binary-format raw-in-base64-out \
   --payload '{"lookback_days":365}' \
   /tmp/curado-backfill.json
 ```
 
-`lookback_days` acepta valores entre 1 y 3650. El workgroup de Athena mantiene
-el límite de 100 MB escaneados por consulta.
+`lookback_days` acepta valores entre 1 y 3650. El curado corre en el
+workgroup de ETL, con tope de 5 GB; el interactivo mantiene el de 100 MB.
+
+Los timelines se descargan solos cada media hora en tandas de 60, pero un
+backfill histórico tarda: son ~2,6 segundos por partida. Para acelerarlo,
+invocar repetidamente hasta recibir `"completo": true`:
+
+```bash
+aws lambda invoke \
+  --function-name lol-pipeline-timeline \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"max_timelines":50}' \
+  /tmp/timeline.json && cat /tmp/timeline.json
+```
 
 Consultar desde Athena con los ejemplos de [`queries.sql`](queries.sql).
 Los hallazgos del análisis sobre los datos reales están en
@@ -583,11 +657,11 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-El servidor queda registrado para Claude Code en `.mcp.json` (usa el
-perfil AWS `portfolio`). Para probarlo a mano:
+El servidor queda registrado para Claude Code en `.mcp.json`. Para
+probarlo a mano:
 
 ```bash
-AWS_PROFILE=portfolio .venv/bin/python server.py
+.venv/bin/python server.py
 ```
 
 ## Próximos pasos

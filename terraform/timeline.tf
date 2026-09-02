@@ -77,6 +77,10 @@ data "archive_file" "timeline" {
   type        = "zip"
   source_dir  = "${path.module}/../lambda-timeline"
   output_path = "${path.module}/build/lambda-timeline.zip"
+  # Los tests importan estos handlers y dejan __pycache__ dentro del
+  # directorio. Sin excluirlo, correr la suite cambia el hash del zip y
+  # Terraform quiere redesplegar la Lambda sin que el código haya cambiado.
+  excludes = ["__pycache__", "*.pyc"]
 }
 
 resource "aws_lambda_function" "timeline" {

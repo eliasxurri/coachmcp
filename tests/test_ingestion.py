@@ -17,7 +17,7 @@ def load_handler():
         "API_KEY_PARAM": "/test/riot-key",
         "GLUE_DATABASE": "test_database",
         "GLUE_TABLE": "matches_raw",
-        "SUMMONERS": "Elias#000,Otro#LAS",
+        "SUMMONERS": "Jugador#TEST,Otro#TEST",
     }
     spec = importlib.util.spec_from_file_location(
         "coachmcp_ingestion_handler", ROOT / "lambda" / "handler.py"
@@ -39,9 +39,9 @@ class BackfillEventTests(unittest.TestCase):
     def test_validates_and_normalizes_backfill_event(self):
         self.assertEqual(
             self.handler.validar_evento_backfill(
-                {"player": " Elias#000 ", "start": "80", "count": "40"}
+                {"player": " Jugador#TEST ", "start": "80", "count": "40"}
             ),
-            ("Elias#000", 80, 40),
+            ("Jugador#TEST", 80, 40),
         )
 
     def test_rejects_unconfigured_player_and_invalid_ranges(self):
@@ -49,11 +49,11 @@ class BackfillEventTests(unittest.TestCase):
             self.handler.validar_evento_backfill({"player": "NoExiste#000"})
         with self.assertRaisesRegex(ValueError, "start"):
             self.handler.validar_evento_backfill(
-                {"player": "Elias#000", "start": -1}
+                {"player": "Jugador#TEST", "start": -1}
             )
         with self.assertRaisesRegex(ValueError, "count"):
             self.handler.validar_evento_backfill(
-                {"player": "Elias#000", "count": 81}
+                {"player": "Jugador#TEST", "count": 81}
             )
 
     def test_full_page_returns_next_cursor(self):
@@ -67,14 +67,14 @@ class BackfillEventTests(unittest.TestCase):
         )
 
         result = self.handler.ejecutar_backfill(
-            {"player": "Elias#000", "start": 160, "count": 80}, "key"
+            {"player": "Jugador#TEST", "start": 160, "count": 80}, "key"
         )
 
         self.assertEqual(result["next_start"], 240)
         self.assertFalse(result["complete"])
         self.assertFalse(result["retry_required"])
         self.handler.procesar_jugador.assert_called_once_with(
-            "Elias#000",
+            "Jugador#TEST",
             "key",
             start=160,
             count=80,
@@ -93,7 +93,7 @@ class BackfillEventTests(unittest.TestCase):
         )
 
         result = self.handler.ejecutar_backfill(
-            {"player": "Elias#000", "start": 80, "count": 80}, "key"
+            {"player": "Jugador#TEST", "start": 80, "count": 80}, "key"
         )
 
         self.assertTrue(result["complete"])
@@ -110,7 +110,7 @@ class BackfillEventTests(unittest.TestCase):
         )
 
         result = self.handler.ejecutar_backfill(
-            {"player": "Elias#000", "start": 80, "count": 80}, "key"
+            {"player": "Jugador#TEST", "start": 80, "count": 80}, "key"
         )
 
         self.assertTrue(result["retry_required"])
@@ -136,7 +136,7 @@ class BackfillEventTests(unittest.TestCase):
         self.handler.ejecutar_backfill = MagicMock(return_value={"ok": True})
 
         result = self.handler.lambda_handler(
-            {"mode": "backfill", "player": "Elias#000"}, None
+            {"mode": "backfill", "player": "Jugador#TEST"}, None
         )
 
         self.assertEqual(result, {"ok": True})

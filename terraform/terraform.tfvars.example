@@ -1,0 +1,15 @@
+# Copiar a terraform.tfvars y poner los datos propios.
+# terraform.tfvars está en .gitignore: nunca se versiona.
+
+# Obligatorio. Riot ID completo, con el tag que aparece junto al nombre
+# en el cliente del juego. Cada jugador cuesta 2+N requests por ejecución,
+# así que con una development key conviene no pasar de ~10.
+tracked_summoners = ["TuNombre#TAG"]
+
+# Opcionales: los defaults están en variables.tf.
+#
+# aws_region          = "sa-east-1"   # la más cercana a donde consultas
+# riot_routing_region = "americas"    # americas | europe | asia | sea
+# project_name        = "lol-pipeline"
+# matches_per_run     = 10
+# schedule_expression = "rate(30 minutes)"
