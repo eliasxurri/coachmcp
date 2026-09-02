@@ -159,6 +159,29 @@ identificable, lo que casi nunca pasa en jungla. Las consultas de
 tendencias cuentan cada métrica por separado en vez de asumir el total
 de la ventana, y marcan esas filas con `cobertura_parcial`.
 
+### Solo ranked solo/duo
+
+**Problema.** Las primeras versiones de las herramientas de tendencias
+traían `ranked_only=False` por defecto, así que mezclaban soloq con flex
+y ARAM. El nombre además era engañoso: flex también es ranked.
+
+**Decisión.** Todas las herramientas filtran por la cola 420 por defecto
+y el parámetro se llama `solo_only`. Flex es un modo menos serio —otra
+disposición mental, otra seriedad de draft— y ARAM directamente no
+comparte las reglas del juego: sin jungla y con pelea constante, sus
+valores de CS, oro y daño por minuto no son comparables.
+
+**Resultado.** No fue cosmético: recalcular las tendencias de 30 días
+solo con soloq cambió las conclusiones. Las tres métricas que aparecían
+como significativas —CS, oro y daño por minuto— dejaron de serlo, y en
+su lugar apareció una caída del 32,6% en wards de control (p=0,0014).
+Las anteriores eran en buena medida un artefacto de mezclar ARAM con
+partidas de Grieta.
+
+Es el mismo error que normalizar por minuto corregía antes, en otra
+forma: comparar cosas que no son comparables produce señal falsa que
+sobrevive incluso a una prueba estadística correcta.
+
 ### Corregir por comparaciones múltiples
 
 **Problema.** Ampliar las métricas comparadas de 9 a 23 rompe en
@@ -517,20 +540,20 @@ expirada).
 Herramientas:
 
 - `list_players` — jugadores presentes en la capa curada, con su Riot ID
-- `get_recent_matches(player, days, limit)` — partidas recientes con
+- `get_recent_matches(player, days, limit, solo_only)` — partidas recientes con
   campeón, rol, resultado, KDA, CS, oro, daño, visión y duración
-- `get_champion_stats(player, days, ranked_only, min_games)` — winrate,
+- `get_champion_stats(player, days, solo_only, min_games)` — winrate,
   KDA, CS por minuto y visión promedio por campeón
-- `get_trends(player, days, ranked_only)` — compara la ventana reciente
+- `get_trends(player, days, solo_only)` — compara la ventana reciente
   contra la anterior de igual duración, métrica por métrica, con p-valor
   y flag `significativo`
-- `get_champion_trends(player, days, ranked_only, min_games)` — qué
+- `get_champion_trends(player, days, solo_only, min_games)` — qué
   campeones son nuevos, cuáles se abandonaron y en cuáles cambió el
   rendimiento
-- `get_coaching_priorities(player, days, rol, ranked_only)` — en qué
+- `get_coaching_priorities(player, days, rol, solo_only)` — en qué
   está por debajo de los jugadores de su propio elo, ordenado por
   tamaño de efecto
-- `get_laning_benchmarks(player, days, rol, ranked_only)` — CS, oro y
+- `get_laning_benchmarks(player, days, rol, solo_only)` — CS, oro y
   XP contra el rival directo de línea en los minutos 5, 10, 14 y 20
 
 Las dos últimas devuelven el p-valor junto a cada delta, más una
@@ -546,6 +569,9 @@ Las pruebas viven en `estadistica.py` y se verifican con:
 El jugador se puede pasar como Riot ID (`nombre#tag`), como nombre a
 secas, o se puede omitir si solo hay uno rastreado: `resolver_puuid` lo
 resuelve contra la propia capa curada.
+
+Todas traen `solo_only=True` por defecto: ver la sección de abajo sobre
+por qué flex y ARAM quedan fuera.
 
 Instalación:
 

@@ -154,7 +154,12 @@ def list_players() -> list[dict]:
 
 
 @mcp.tool()
-def get_recent_matches(player: str | None = None, days: int = 7, limit: int = 20) -> list[dict]:
+def get_recent_matches(
+    player: str | None = None,
+    days: int = 7,
+    limit: int = 20,
+    solo_only: bool = True,
+) -> list[dict]:
     """
     Partidas recientes de un jugador con sus estadísticas: campeón, rol,
     resultado, KDA, CS, daño y duración.
@@ -164,8 +169,12 @@ def get_recent_matches(player: str | None = None, days: int = 7, limit: int = 20
             hay un jugador rastreado.
         days: ventana hacia atrás en días (por fecha de juego).
         limit: máximo de partidas a devolver, las más recientes primero.
+        solo_only: por defecto True, solo ranked solo/duo (cola 420).
+            Flex queda fuera a propósito: es un modo menos serio y
+            mezclarlo ensucia cualquier conclusión.
     """
     puuid = resolver_puuid(player)
+    filtro_cola = "AND queue_id = 420" if solo_only else ""
     rows = run_query(f"""
         SELECT
             match_id,
@@ -189,6 +198,7 @@ def get_recent_matches(player: str | None = None, days: int = 7, limit: int = 20
         FROM matches_curated
         WHERE puuid = {sql_str(puuid)}
           AND {filtro_fecha(days)}
+          {filtro_cola}
         ORDER BY jugada_en DESC
         LIMIT {int(limit)}
     """)
@@ -203,7 +213,7 @@ def get_recent_matches(player: str | None = None, days: int = 7, limit: int = 20
 def get_champion_stats(
     player: str | None = None,
     days: int = 90,
-    ranked_only: bool = False,
+    solo_only: bool = True,
     min_games: int = 1,
 ) -> list[dict]:
     """
@@ -213,11 +223,13 @@ def get_champion_stats(
         player: Riot ID ("nombre#tag"), nombre a secas, o vacío si solo
             hay un jugador rastreado.
         days: ventana hacia atrás en días.
-        ranked_only: True para contar solo ranked solo/duo (queue 420).
+        solo_only: por defecto True, solo ranked solo/duo (cola 420).
+            Flex queda fuera a propósito: es un modo menos serio y
+            mezclarlo ensucia cualquier conclusión.
         min_games: descarta campeones con menos partidas que esto.
     """
     puuid = resolver_puuid(player)
-    filtro_cola = "AND queue_id = 420" if ranked_only else ""
+    filtro_cola = "AND queue_id = 420" if solo_only else ""
     rows = run_query(f"""
         SELECT
             campeon,
@@ -314,7 +326,7 @@ def _redondear(valor, decimales=2):
 def get_trends(
     player: str | None = None,
     days: int = 30,
-    ranked_only: bool = False,
+    solo_only: bool = True,
 ) -> dict:
     """
     Compara la ventana reciente contra la anterior de igual duración y
@@ -337,10 +349,12 @@ def get_trends(
             hay un jugador rastreado.
         days: duración de cada ventana. days=30 compara los últimos 30
             días contra los 30 anteriores.
-        ranked_only: True para contar solo ranked solo/duo (queue 420).
+        solo_only: por defecto True, solo ranked solo/duo (cola 420).
+            Flex queda fuera a propósito: es un modo menos serio y
+            mezclarlo ensucia cualquier conclusión.
     """
     puuid = resolver_puuid(player)
-    filtro_cola = "AND queue_id = 420" if ranked_only else ""
+    filtro_cola = "AND queue_id = 420" if solo_only else ""
 
     ahora = datetime.now(timezone.utc)
     corte = ahora - timedelta(days=days)
@@ -481,7 +495,7 @@ def get_trends(
     return {
         "jugador": player or "(único rastreado)",
         "ventana_dias": days,
-        "ranked_only": ranked_only,
+        "solo_only": solo_only,
         "reciente": {
             "desde": corte.strftime(fmt), "hasta": ahora.strftime(fmt),
             "partidas": n_rec, "victorias": v_rec,
@@ -502,7 +516,7 @@ def get_trends(
 def get_champion_trends(
     player: str | None = None,
     days: int = 30,
-    ranked_only: bool = False,
+    solo_only: bool = True,
     min_games: int = 3,
 ) -> list[dict]:
     """
@@ -517,12 +531,14 @@ def get_champion_trends(
         player: Riot ID ("nombre#tag"), nombre a secas, o vacío si solo
             hay un jugador rastreado.
         days: duración de cada ventana.
-        ranked_only: True para contar solo ranked solo/duo (queue 420).
+        solo_only: por defecto True, solo ranked solo/duo (cola 420).
+            Flex queda fuera a propósito: es un modo menos serio y
+            mezclarlo ensucia cualquier conclusión.
         min_games: mínimo de partidas (sumando ambas ventanas) para
             incluir un campeón.
     """
     puuid = resolver_puuid(player)
-    filtro_cola = "AND queue_id = 420" if ranked_only else ""
+    filtro_cola = "AND queue_id = 420" if solo_only else ""
 
     ahora = datetime.now(timezone.utc)
     corte = ahora - timedelta(days=days)
@@ -622,7 +638,7 @@ def get_coaching_priorities(
     player: str | None = None,
     days: int = 90,
     rol: str | None = None,
-    ranked_only: bool = True,
+    solo_only: bool = True,
 ) -> dict:
     """
     Compara al jugador contra los otros jugadores de sus propias partidas
@@ -650,10 +666,12 @@ def get_coaching_priorities(
         days: ventana hacia atrás en días.
         rol: TOP, JUNGLE, MIDDLE, BOTTOM o UTILITY. Si se omite, usa el
             rol más jugado en la ventana.
-        ranked_only: True para comparar solo ranked solo/duo (queue 420).
+        solo_only: por defecto True, solo ranked solo/duo (cola 420).
+            Flex queda fuera a propósito: es un modo menos serio y
+            mezclarlo ensucia cualquier conclusión.
     """
     puuid = resolver_puuid(player)
-    filtro_cola = "AND queue_id = 420" if ranked_only else ""
+    filtro_cola = "AND queue_id = 420" if solo_only else ""
     filtro = filtro_fecha(days)
 
     if rol is None:
@@ -764,7 +782,7 @@ def get_coaching_priorities(
         "jugador": player or "(único rastreado)",
         "rol": rol,
         "ventana_dias": days,
-        "ranked_only": ranked_only,
+        "solo_only": solo_only,
         "partidas_jugador": n_yo,
         "partidas_pares": n_pares,
         "jugadores_pares": int(pares.get("jugadores") or 0),
@@ -791,7 +809,7 @@ def get_laning_benchmarks(
     player: str | None = None,
     days: int = 90,
     rol: str | None = None,
-    ranked_only: bool = True,
+    solo_only: bool = True,
 ) -> dict:
     """
     Cómo va el jugador contra su rival directo de línea en los minutos
@@ -813,13 +831,15 @@ def get_laning_benchmarks(
         days: ventana hacia atrás en días.
         rol: TOP, JUNGLE, MIDDLE, BOTTOM o UTILITY. Si se omite, agrupa
             por rol y devuelve todos.
-        ranked_only: True para contar solo ranked solo/duo (queue 420).
+        solo_only: por defecto True, solo ranked solo/duo (cola 420).
+            Flex queda fuera a propósito: es un modo menos serio y
+            mezclarlo ensucia cualquier conclusión.
     """
     puuid = resolver_puuid(player)
 
     # timeline_frames no guarda queue_id ni fecha: se filtran cruzando
     # con matches_curated, que sí los tiene y es una tabla diminuta.
-    filtro_cola = "AND m.queue_id = 420" if ranked_only else ""
+    filtro_cola = "AND m.queue_id = 420" if solo_only else ""
     filtro_rol = f"AND f.rol = {sql_str(rol)}" if rol else ""
     minutos = ", ".join(str(m) for m in MINUTOS_REFERENCIA)
 
@@ -865,7 +885,7 @@ def get_laning_benchmarks(
     return {
         "jugador": player or "(único rastreado)",
         "ventana_dias": days,
-        "ranked_only": ranked_only,
+        "solo_only": solo_only,
         "minutos_referencia": list(MINUTOS_REFERENCIA),
         "por_rol": por_rol,
         "nota": ("diff_* es la diferencia contra el rival directo de línea: "

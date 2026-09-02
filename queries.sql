@@ -4,6 +4,11 @@
 -- posible: Athena cobra por TB escaneado y las particiones son lo que
 -- evita leer el bucket completo en cada consulta.
 --
+-- Regla de colas: solo cuenta ranked solo/duo (queue_id 420). Flex es un
+-- modo menos serio y mezclarlo ensucia las conclusiones; ARAM directamente
+-- distorsiona CS, oro y daño por minuto. Por eso casi todas las consultas
+-- filtran por 420.
+--
 -- Las consultas 1-4 van contra matches_raw (JSON crudo). Para el uso
 -- diario conviene la capa curada en Parquet (consultas 5 en adelante):
 -- sobre las mismas 800 partidas, el winrate por campeón escanea 75 MB
@@ -170,6 +175,7 @@ SELECT
 FROM matches_curated
 WHERE puuid = '<TU_PUUID>'
   AND rol <> ''
+  AND queue_id = 420
 GROUP BY rol
 ORDER BY partidas DESC;
 
@@ -201,6 +207,7 @@ WITH ventanas AS (
     FROM matches_curated
     WHERE puuid = '<TU_PUUID>'
       AND jugada_en >= current_timestamp - INTERVAL '60' DAY
+      AND queue_id = 420
 )
 SELECT
     ventana,
@@ -244,6 +251,7 @@ SELECT
 FROM matches_curated
 WHERE puuid = '<TU_PUUID>'
   AND rol <> ''
+  AND queue_id = 420
 GROUP BY rol
 ORDER BY partidas DESC;
 
@@ -263,6 +271,7 @@ SELECT
     round(avg(oro_por_min), 1)  AS oro_por_min
 FROM matches_curated
 WHERE puuid = '<TU_PUUID>'
+  AND queue_id = 420
 GROUP BY regexp_extract(parche, '^(\d+\.\d+)', 1)
 HAVING count(*) >= 10
 -- Ordenar por texto pondría 16.9 por encima de 16.17: hay que comparar
@@ -288,6 +297,7 @@ SELECT
     ) AS kda
 FROM matches_curated
 WHERE puuid = '<TU_PUUID>'
+  AND queue_id = 420
 GROUP BY date_format(jugada_en, '%Y-%m')
 ORDER BY mes DESC;
 
@@ -398,15 +408,18 @@ ORDER BY f.rol, f.minuto;
 -- ---------------------------------------------------------------------
 SELECT
     CASE
-        WHEN diff_oro >  500 THEN 'adelante (+500)'
-        WHEN diff_oro < -500 THEN 'atras (-500)'
+        WHEN f.diff_oro >  500 THEN 'adelante (+500)'
+        WHEN f.diff_oro < -500 THEN 'atras (-500)'
         ELSE 'parejo'
     END AS estado_min14,
     count(*) AS partidas,
-    round(100.0 * sum(CASE WHEN victoria THEN 1 ELSE 0 END) / count(*), 1) AS winrate_pct
-FROM timeline_frames
-WHERE puuid = '<TU_PUUID>'
-  AND minuto = 14
-  AND oro_rival IS NOT NULL
+    round(100.0 * sum(CASE WHEN f.victoria THEN 1 ELSE 0 END) / count(*), 1) AS winrate_pct
+FROM timeline_frames f
+JOIN matches_curated m
+  ON m.match_id = f.match_id AND m.puuid = f.puuid
+WHERE f.puuid = '<TU_PUUID>'
+  AND f.minuto = 14
+  AND f.oro_rival IS NOT NULL
+  AND m.queue_id = 420
 GROUP BY 1
 ORDER BY partidas DESC;
