@@ -1,0 +1,572 @@
+# Pipeline de datos de League of Legends en AWS
+
+Pipeline serverless que ingiere partidas desde la API de Riot Games hacia
+un data lake en S3, consultable con SQL vía Athena. Toda la infraestructura
+está definida en Terraform.
+
+El objetivo no era solo mover datos: cada componente se eligió resolviendo
+una tensión concreta entre costo, límites externos y complejidad operacional.
+Este documento explica esas decisiones.
+
+---
+
+## Arquitectura
+
+```
+EventBridge (cada 30 min)
+      │
+      ▼
+  Lambda (Python 3.12)
+      ├── Parameter Store ──── API key (SecureString)
+      ├── DynamoDB ─────────── watermark de ingesta
+      ├── Riot API ─────────── PUUID → match IDs → detalle
+      └── S3 ───────────────── partidas crudas particionadas
+                                    │
+                          Glue Data Catalog
+                                    │
+                         Lambda de curado
+                                    │
+                         Athena → Parquet
+                                    │
+                              MCP (stdio)
+```
+
+**Flujo:** EventBridge dispara la Lambda cada 30 minutos. La función lee la
+API key desde Parameter Store, consulta en DynamoDB qué partidas ya se
+ingirieron, pide a Riot solo las nuevas, y las escribe en S3 particionadas
+por jugador y fecha. Registra la partición en el catálogo de Glue para que
+Athena pueda consultarla.
+
+---
+
+## Decisiones de diseño
+
+### Ingesta incremental con watermark
+
+**Problema.** La API de Riot limita a 100 requests cada 2 minutos en las
+development y personal keys. Obtener el historial de un jugador cuesta
+`2 + N` requests (resolver PUUID, listar match IDs, y una llamada por
+partida). Reprocesar todo en cada ejecución agotaría la cuota rápidamente.
+
+**Decisión.** Las partidas terminadas son inmutables, así que no hay razón
+para volver a leerlas. Una tabla de DynamoDB guarda los match IDs ya
+ingeridos por jugador, y cada ejecución solo descarga los nuevos.
+
+**Resultado.** Con ~5 partidas nuevas por jugador entre ejecuciones, el
+consumo es de ~7 requests cada 30 minutos. Queda margen para rastrear
+10 jugadores sin acercarse al límite.
+
+El watermark guarda un conjunto de IDs recientes en lugar del último ID
+porque la API no siempre devuelve las partidas en orden estricto.
+
+### Particionado por jugador y fecha
+
+**Problema.** Athena cobra por TB escaneado. Sin particiones, cada consulta
+lee el bucket completo.
+
+**Decisión.**
+
+```
+raw/puuid=<jugador>/year=YYYY/month=MM/day=DD/<match_id>.json
+```
+
+El PUUID va primero porque toda consulta del caso de uso empieza por un
+jugador concreto. La fecha se toma de `gameCreation` (cuándo se jugó) y no
+de la fecha de ingesta, para que una partida caiga siempre en la partición
+correcta aunque se procese con retraso.
+
+**Resultado.** Consultar un mes de un jugador escanea solo esa carpeta.
+
+### Sin Glue Crawler
+
+**Problema.** El patrón habitual usa un Glue Crawler para descubrir el
+esquema. Cobra por DPU-hora con un mínimo de 10 minutos por ejecución:
+corriendo a diario son unos **$2.20/mes**.
+
+**Decisión.** El esquema de la API de Riot es conocido y estable, así que
+se define estáticamente en Terraform. La Lambda registra las particiones
+nuevas mediante `CreatePartition`, que es gratis.
+
+**Resultado.** $2.20/mes menos sin perder funcionalidad. El costo es que un
+cambio de esquema exige actualizar el Terraform, algo aceptable para una
+API pública y versionada.
+
+### Capa curada en Parquet
+
+**Problema.** La capa raw guarda el JSON completo de Riot (~90 KB por
+partida) y las consultas extraen campos con `json_extract`. Con 800
+partidas ingeridas, un winrate por campeón escaneaba **75 MB**: Athena
+tiene que leer el payload entero de cada partida para sacar seis campos.
+El workgroup corta a 100 MB por consulta, así que el propio guardarraíl
+de costo estaba a punto de romper las consultas del asistente.
+
+**Decisión.** Una tabla `matches_curated` en Parquet con una fila por
+jugador rastreado y partida, y solo las columnas que el caso de uso
+necesita (16 en la primera versión, 83 hoy). La transformación la hace Athena con un `INSERT INTO ... SELECT`
+que orquesta una Lambda mínima: escribir Parquet desde la Lambda de
+ingesta exigiría empaquetar pyarrow (~100 MB) y un Glue Job cobraría por
+DPU-hora.
+
+**Resultado.** La misma consulta sobre las mismas 800 partidas:
+
+| Capa | Escaneado | Tiempo |
+|---|---|---|
+| `matches_raw` (JSON) | 75.191.906 bytes | 2.150 ms |
+| `matches_curated` (Parquet) | 2.480 bytes | 738 ms |
+
+Son **30.000 veces menos datos escaneados**. El formato columnar lee solo
+las columnas de la consulta, y en Parquet 800 partidas ocupan 36 KB
+frente a los 75 MB del JSON crudo. Las consultas del MCP dejaron de
+depender de `json_extract` y el margen contra el corte de 100 MB pasó a
+ser de varios órdenes de magnitud.
+
+El costo es duplicar el almacenamiento, que a 36 KB es irrelevante, y
+mantener el esquema en dos lugares. La capa raw se conserva igual: es la
+que permite reconstruir la curada si el esquema cambia.
+
+### Aprovechar `challenges` en vez de derivar métricas
+
+**Problema.** La primera versión de la capa curada extraía 16 columnas y
+el servidor MCP derivaba a mano lo demás (daño por minuto, KDA). Pero el
+payload de Riot trae **156 campos por participante**, 127 de ellos en un
+objeto `challenges` que ya viene calculado. Estábamos reimplementando —
+peor— cosas que ya estaban en S3, y dejando fuera todo el early game.
+
+**Decisión.** Se ampliaron las columnas de 16 a **83**. Las tasas ahora
+vienen de Riot (`damagePerMinute`, `goldPerMinute`, `killParticipation`,
+`teamDamagePercentage`), y se incorporaron métricas que no se pueden
+derivar del resumen: CS en los primeros 10 minutos, ventaja de CS y de
+nivel sobre el rival de línea, placas de torre, tiempo total muerto,
+desglose de visión, y el parche en que se jugó.
+
+No hizo falta ni una llamada nueva a la API: los 800 partidos ya estaban
+en la capa raw. Esto es justamente para lo que existe esa capa.
+
+**Cuidado con la migración.** `INSERT INTO` en Athena empareja columnas
+**por posición**, no por nombre: un desajuste entre el `SELECT` y la
+tabla escribiría oro en la columna de wards sin dar error. Por eso el
+esquema Terraform y el SQL se generan desde una única lista ordenada, y
+tras el despliegue se verificó una fila contra el JSON crudo campo por
+campo. Además hubo que **borrar y reconstruir** la capa curada: el
+anti-join habría saltado las filas viejas, dejándolas con las columnas
+nuevas en NULL para siempre. Reconstruir desde raw tomó una consulta.
+
+**Cobertura.** 26 columnas están completas en las 800 partidas y la
+mayoría de `challenges` llega a 799 (una partida vieja no lo trae). Las
+cinco métricas de ventaja sobre el rival de línea solo aparecen en el
+77%: Riot únicamente las calcula cuando hay un oponente directo
+identificable, lo que casi nunca pasa en jungla. Las consultas de
+tendencias cuentan cada métrica por separado en vez de asumir el total
+de la ventana, y marcan esas filas con `cobertura_parcial`.
+
+### Corregir por comparaciones múltiples
+
+**Problema.** Ampliar las métricas comparadas de 9 a 23 rompe en
+silencio la garantía de la capa de tendencias: probar 23 hipótesis con
+umbral 0,05 produce **más de una "significativa" por azar en cada
+consulta**. Agregar métricas habría hecho el sistema menos confiable,
+no más.
+
+**Decisión.** Benjamini-Hochberg sobre el conjunto completo de pruebas.
+Se eligió por encima de Bonferroni porque este último, al dividir el
+umbral entre el número de pruebas, escondería mejoras reales: aquí
+importa más no perderlas que blindarse contra un único falso positivo.
+
+El resultado se reporta en tres niveles en vez de un binario, porque
+colapsar a "no significativo" perdía señal útil para un coach:
+
+| Clasificación | Significa |
+|---|---|
+| `significativo` | Sobrevive la corrección; se puede afirmar |
+| `indicio` | Pasa el umbral simple pero no la corrección; pista a vigilar |
+| `ruido` | Indistinguible del azar |
+
+**Resultado.** Sobre los datos reales, 8 métricas pasaban el umbral
+simple y solo 3 sobreviven la corrección. Las otras 5 quedan como
+indicio: una caída del 51% en tiempo muerto (p=0,014) es demasiado
+interesante para tirarla, pero afirmarla como hecho sería sobrevender.
+
+### Timeline: la única fuente que sí exige llamadas nuevas
+
+**Problema.** Todo lo anterior sale del resumen de la partida, que solo
+tiene totales finales. No hay forma de saber si una derrota se decidió
+en la fase de líneas o en una pelea del minuto 30, ni de comparar el
+progreso contra el rival directo mientras la partida ocurre.
+
+**Decisión.** Ingerir el timeline (`/lol/match/v5/matches/{id}/timeline`),
+asumiendo su costo con los ojos abiertos: **un request extra por
+partida** —el doble que antes, contra el límite de 100 cada 2 minutos— y
+**1,1 MB por timeline frente a 84 KB** del resumen.
+
+Tres decisiones acotan ese costo:
+
+- **Lambda propia con presupuesto por ejecución.** Baja hasta 60
+  timelines por corrida y se agenda en `cron(15,45 * * * ? *)`, quince
+  minutos desfasada de la ingesta de partidas: ambas comparten la misma
+  API key y alternarlas evita que los picos coincidan.
+- **Sin watermark.** Compara los `match_id` que hay bajo `raw/` contra
+  los de `timelines/` y baja la diferencia. Es autorreparable, no guarda
+  estado que pueda desincronizarse, y al terminar el backfill sigue
+  recogiendo las partidas nuevas sin cambiar nada.
+- **Proyección obligatoria a Parquet.** Consultar los timelines crudos
+  no es viable: los 800 pesan ~840 MB. `timeline_frames` los aplana a
+  una fila por minuto con el jugador y su rival de línea lado a lado.
+
+**Resultado.** Aparece la curva que el resumen no puede dar. En una
+partida de mid: +13 CS en el minuto 5, oro empatado en el 10, y +1.919
+de oro en el 20. Eso distingue a quien gana la línea de quien la
+capitaliza.
+
+### Un workgroup aparte para el ETL
+
+**Problema.** El workgroup corta a 100 MB por consulta, y esa red de
+seguridad venía funcionando. Pero curar los timelines exige leer JSON
+crudo —unos 840 MB para el histórico— y bajo ese límite el trabajo
+legítimo falla.
+
+**Decisión.** Un segundo workgroup `lol-pipeline-etl` con tope de 5 GB,
+usado solo por la Lambda de curado. El interactivo, que es el que usa el
+servidor MCP, se queda en 100 MB.
+
+La alternativa era subir el límite global, y habría sido peor: las
+consultas del asistente van contra Parquet y nunca deberían acercarse a
+100 MB, así que aflojar su guardarraíl por culpa de un trabajo de ETL
+habría dejado sin proteger justo el camino por donde llegan consultas
+imprevisibles. Aun con 5 GB de tope, un backfill completo cuesta menos
+de un centavo.
+
+### Baseline de pares: el elo propio ya estaba en los datos
+
+**Problema.** Toda la analítica anterior era relativa al pasado del
+propio jugador. Saber que el CS por minuto subió 33% no dice si 6,27 es
+bueno, y sin esa referencia una "síntesis de coaching" solo puede
+repetir lo que ya dice `get_trends`. Lo que hace falta es saber qué está
+por debajo del nivel al que ya se juega.
+
+**Decisión.** El baseline son **los otros 9 jugadores de cada partida**.
+El matchmaking los empareja al mismo MMR, así que son una muestra del
+elo propio, y ya venían en cada payload: 6.468 filas de ~5.200 jugadores
+distintos, sin una sola llamada extra a la API ni depender de endpoints
+de ranking.
+
+La tabla `peers_curated` guarda los 10 participantes con las métricas
+mínimas para comparar, particionada por rol porque toda comparación es
+dentro del mismo rol: el CS de un jungla no se compara con el de un mid.
+
+**Resultado.** Sobre los datos reales, en jungla el jugador farmea por
+encima de sus pares (CS/min +10%, ventaja de CS sobre el rival +84%)
+pero participa en menos peleas (48% contra 55%, efecto mediano). Eso es
+un diagnóstico accionable que ninguna comparación contra el propio
+pasado podía dar.
+
+### Ordenar prioridades por tamaño de efecto, no por p-valor
+
+**Problema.** Comparar contra miles de partidas de pares hace que casi
+cualquier diferencia salga estadísticamente significativa: con n grande,
+el p-valor detecta diferencias irrelevantes. Ordenar prioridades por
+p-valor pondría primero lo que tiene más muestra, no lo que más afecta
+al juego.
+
+**Decisión.** Se calcula la **d de Cohen** (diferencia entre medias en
+unidades de desviación estándar) y las prioridades se ordenan por ella.
+El p-valor queda como filtro —hay que descartar el azar— y se exige
+además que el efecto supere el umbral de "chico" (0,2) para que una
+diferencia real pero minúscula no se presente como algo a corregir.
+
+La suite de tests incluye el caso que lo justifica: con el mismo efecto
+(d=0,05), pasar la muestra de 30 a 10.000 partidas mueve el p-valor de
+0,85 a 0,000. El efecto no se mueve; el p-valor sí.
+
+### La herramienta da evidencia, el asistente da el consejo
+
+`get_coaching_priorities` devuelve métricas ordenadas con sus números,
+tamaños de efecto y muestras, y nada más: no infiere causas, no
+recomienda qué entrenar ni escribe prosa de coach. Esa separación es
+deliberada. Un modelo sintetiza bien un plan a partir de evidencia
+ordenada, pero si la herramienta ya entregara conclusiones redactadas,
+el asistente las repetiría sin poder verificarlas, y cualquier error de
+atribución causal quedaría blindado detrás de una cifra.
+
+### Particionar la capa curada solo por jugador
+
+La capa raw se particiona por `puuid` y fecha, pero la curada solo por
+`puuid`. Un `INSERT` cada 30 minutos sobre particiones diarias generaría
+una explosión de archivos Parquet diminutos, y muchos archivos pequeños
+son más lentos de leer que pocos grandes. Con partición por jugador, el
+filtrado temporal lo resuelven las estadísticas min/max de columna que
+Parquet guarda en cada bloque.
+
+### Idempotencia del curado
+
+El `INSERT` descarta con un anti-join las partidas ya curadas —por
+`(match_id, puuid)`, no solo por `match_id`, porque una misma partida
+puede tener a dos jugadores rastreados— y un lock con escritura
+condicional en DynamoDB impide que dos ejecuciones solapadas dupliquen
+filas. Sin ambos, cada corrida reinsertaría lo mismo: Athena no tiene
+`UPDATE` ni claves únicas.
+
+### Tendencias con prueba de significancia
+
+**Problema.** Una detección de tendencias ingenua compara dos ventanas y
+reporta el delta. Con decenas de partidas eso produce falsos positivos
+constantes: en los datos reales del proyecto, el winrate cayó de 58,2% a
+55,4% entre dos ventanas de 30 días, y un tablero cualquiera lo habría
+anunciado como un bajón. La prueba de dos proporciones da **p=0,71**: es
+exactamente lo que se espera del azar. Un asistente que se traga ese
+ruido manda a corregir algo que nunca se rompió.
+
+**Decisión.** Cada métrica comparada trae su p-valor y un flag
+`significativo`. La t de Welch para las medias (no se puede asumir
+varianza igual: cambiar de campeones cambia la dispersión) y la z de dos
+proporciones para el winrate. Se calculan a mano en `estadistica.py`
+—unas 100 líneas— en vez de traer scipy: la distribución t se evalúa
+exacta vía beta incompleta, no por aproximación normal, porque las
+muestras chicas son justo donde una aproximación inventaría señal.
+
+Además, si alguna ventana baja de 10 partidas, la respuesta marca
+`muestra_suficiente: false` y lo dice en texto: un p-valor bajo con 6
+partidas sigue siendo frágil.
+
+**Resultado.** Sobre los datos reales, de 9 métricas comparadas solo 4
+resultaron significativas. Las otras 5 —winrate incluido— quedan
+explícitamente marcadas como ruido en vez de convertirse en consejos.
+
+### Métricas normalizadas por minuto
+
+CS, daño y oro se comparan por minuto, no como total de partida. Al
+medirlo se vio por qué importa: entre las dos ventanas la duración media
+subió 9,7%, y con los totales crudos el oro parecía sin cambios
+(p=0,78). Normalizado, la caída de 10,2% en oro por minuto aparece con
+p=0,006. Los totales estaban midiendo cuánto duró la partida tanto como
+cuán bien se jugó.
+
+`duracion_min` se reporta aparte y marcada como neutra: no es mejor ni
+peor por sí sola, pero es el contexto que explica al resto.
+
+### Parameter Store en vez de Secrets Manager
+
+**Problema.** Secrets Manager cuesta $0.40/mes por secreto.
+
+**Decisión.** Un SecureString en Parameter Store (tier Standard) es gratis
+y ofrece lo mismo salvo la rotación automática, que aquí no aporta porque
+la API key de Riot no rota por sí sola.
+
+**Resultado.** $0.40/mes menos. Si en el futuro se necesitara rotación
+automática, migrar a Secrets Manager es un cambio acotado.
+
+### El valor de la API key no está en Terraform
+
+El recurso `aws_ssm_parameter` se crea con un placeholder y un
+`lifecycle { ignore_changes = [value] }`. La key real se carga aparte con
+la CLI.
+
+**Razón.** Terraform guarda todos los valores en el state file **en texto
+plano**. Poner la key en el código o en un `.tfvars` la expondría en el
+state y potencialmente en el repositorio.
+
+### Lambda sobre contenedores
+
+La ingesta dura segundos, se dispara por evento y no mantiene estado: las
+tres condiciones donde Lambda encaja. Un servicio en contenedores estaría
+encendido las 24 horas para trabajar unos segundos cada media hora.
+
+Los 256 MB de memoria son deliberados: el trabajo es I/O (esperas de red),
+no cómputo. Más memoria daría más CPU sin acelerar nada.
+
+### Lifecycle policies en S3
+
+Las partidas se consultan mucho al principio y casi nunca pasado un tiempo.
+La política mueve a Standard-IA a los 30 días (el mínimo que permite S3) y
+a Glacier Instant Retrieval a los 180.
+
+Se eligió Glacier **Instant** Retrieval en vez de Flexible porque el caso de
+uso —un asistente respondiendo preguntas— no tolera esperas de horas.
+
+---
+
+## Costos
+
+Estimación mensual con 5 jugadores rastreados (~150 partidas/mes, ~50 MB):
+
+| Servicio | Uso | Costo |
+|---|---|---|
+| Lambda | 1.440 ejecuciones, ~3.700 GB-s | $0 (free tier) |
+| S3 | ~50 MB | $0 (free tier 12 meses) |
+| DynamoDB | on-demand, volumen mínimo | $0 (free tier permanente) |
+| Parameter Store | 1 SecureString (Standard) | $0 |
+| Glue Data Catalog | 1 tabla, particiones | $0 (free tier permanente) |
+| Athena | consultas ocasionales sobre 50 MB | ~$0 |
+| CloudWatch Logs | retención de 14 días | $0 (free tier) |
+| **Total** | | **~$0.05/mes** |
+
+Sin las dos optimizaciones descritas arriba, el costo sería **~$2.60/mes**.
+
+**Protecciones de costo configuradas:**
+- Workgroup de Athena con corte a 100 MB escaneados por consulta
+- Retención de logs de 14 días
+- Expiración de resultados de Athena a los 7 días
+- Limpieza de versiones antiguas y multipart uploads incompletos
+
+---
+
+## Seguridad
+
+- **Mínimo privilegio.** El rol de la Lambda acota cada acción al ARN
+  exacto: escribe solo bajo `raw/*`, lee solo ese parámetro, opera solo
+  sobre esa tabla. Ningún `Resource: "*"`.
+- **Permiso de KMS explícito.** Leer un SecureString exige tanto
+  `ssm:GetParameter` como `kms:Decrypt` sobre la llave. Ambos están
+  declarados por separado.
+- **Bucket cerrado.** Public access block activo en las cuatro opciones.
+- **Cifrado en reposo** en S3 y en el parámetro.
+- **Sin credenciales en el código.** La key vive solo en Parameter Store.
+
+---
+
+## Limitaciones conocidas
+
+**Expiración de la API key.** Las development keys de Riot expiran cada 24
+horas y hay que regenerarlas manualmente. Para un despliegue permanente
+hace falta una Personal API Key. La alarma de CloudWatch avisa cuando la
+ingesta empieza a fallar por esta causa.
+
+**Curado por ventana temporal.** La transformación a Parquet revisa por
+defecto los últimos tres días. Los backfills históricos requieren invocarla
+manualmente con una ventana que cubra la partida más antigua ingerida.
+
+**Un solo escritor en la ingesta.** El watermark asume que solo hay una
+ejecución de ingesta a la vez. Con concurrencia habría que usar escrituras
+condicionales, como las que ya protegen al curado.
+
+---
+
+## Despliegue
+
+```bash
+cd terraform
+terraform init
+terraform apply
+```
+
+Cargar la API key (no queda en el código ni en el state):
+
+```bash
+aws ssm put-parameter \
+  --name /lol-pipeline/riot-api-key \
+  --value "RGAPI-..." \
+  --type SecureString \
+  --overwrite
+```
+
+Probar la ingesta:
+
+```bash
+aws lambda invoke \
+  --function-name lol-pipeline-ingesta \
+    respuesta.json && cat respuesta.json
+```
+
+### Backfill histórico
+
+La ingesta programada continúa consultando solo las partidas recientes. Para
+traer historia anterior, se invoca manualmente una página de hasta 80 partidas
+para uno de los jugadores definidos en `tracked_summoners`:
+
+```bash
+AWS_PROFILE=portfolio aws lambda invoke \
+  --function-name lol-pipeline-ingesta \
+  --region sa-east-1 \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"mode":"backfill","player":"Elias#000","start":0,"count":80}' \
+  /tmp/backfill.json
+```
+
+La respuesta entrega `next_start`. Se usa ese valor en la siguiente
+invocación hasta recibir `complete: true`. Si `retry_required` es `true`, se
+repite el mismo `start`: los objetos que ya existen en S3 se omiten sin crear
+otra versión.
+
+Después de la última página se cura la ventana histórica. Por ejemplo, para
+un año:
+
+```bash
+AWS_PROFILE=portfolio aws lambda invoke \
+  --function-name lol-pipeline-curado \
+  --region sa-east-1 \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"lookback_days":365}' \
+  /tmp/curado-backfill.json
+```
+
+`lookback_days` acepta valores entre 1 y 3650. El workgroup de Athena mantiene
+el límite de 100 MB escaneados por consulta.
+
+Consultar desde Athena con los ejemplos de [`queries.sql`](queries.sql).
+
+Para destruir todo: `terraform destroy`.
+
+---
+
+## Servidor MCP
+
+`mcp-server/server.py` expone el data lake como herramientas MCP para un
+asistente conversacional. Corre local por stdio, consulta la capa curada
+con boto3 y no depende de la API de Riot (funciona aunque la key esté
+expirada).
+
+Herramientas:
+
+- `list_players` — jugadores presentes en la capa curada, con su Riot ID
+- `get_recent_matches(player, days, limit)` — partidas recientes con
+  campeón, rol, resultado, KDA, CS, oro, daño, visión y duración
+- `get_champion_stats(player, days, ranked_only, min_games)` — winrate,
+  KDA, CS por minuto y visión promedio por campeón
+- `get_trends(player, days, ranked_only)` — compara la ventana reciente
+  contra la anterior de igual duración, métrica por métrica, con p-valor
+  y flag `significativo`
+- `get_champion_trends(player, days, ranked_only, min_games)` — qué
+  campeones son nuevos, cuáles se abandonaron y en cuáles cambió el
+  rendimiento
+- `get_coaching_priorities(player, days, rol, ranked_only)` — en qué
+  está por debajo de los jugadores de su propio elo, ordenado por
+  tamaño de efecto
+- `get_laning_benchmarks(player, days, rol, ranked_only)` — CS, oro y
+  XP contra el rival directo de línea en los minutos 5, 10, 14 y 20
+
+Las dos últimas devuelven el p-valor junto a cada delta, más una
+`clasificacion` de tres niveles (`significativo` / `indicio` / `ruido`)
+ya corregida por comparaciones múltiples. Solo lo marcado como
+`significativo` se puede afirmar; un `indicio` es una pista a vigilar.
+Las pruebas viven en `estadistica.py` y se verifican con:
+
+```bash
+.venv/bin/python test_estadistica.py
+```
+
+El jugador se puede pasar como Riot ID (`nombre#tag`), como nombre a
+secas, o se puede omitir si solo hay uno rastreado: `resolver_puuid` lo
+resuelve contra la propia capa curada.
+
+Instalación:
+
+```bash
+cd mcp-server
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+El servidor queda registrado para Claude Code en `.mcp.json` (usa el
+perfil AWS `portfolio`). Para probarlo a mano:
+
+```bash
+AWS_PROFILE=portfolio .venv/bin/python server.py
+```
+
+## Próximos pasos
+
+- **Eventos del timeline**, que ya están descargados pero sin proyectar:
+  `timelines_raw` guarda kills con posición y timestamp, compras de
+  ítems, wards y placas. Permitiría mapas de dónde se muere, orden de
+  build y timing del primer back.
+- **Rango real vía League-V4**, para contrastar el baseline de pares
+  contra el tier declarado en vez de inferirlo del matchmaking.

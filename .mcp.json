@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "lol-coach": {
+      "command": "mcp-server/.venv/bin/python",
+      "args": ["mcp-server/server.py"],
+      "env": {
+        "AWS_PROFILE": "portfolio",
+        "AWS_REGION": "sa-east-1"
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+.terraform.lock.hcl
+terraform/build/
+# Los planes guardados son artefactos binarios y llevan dentro los
+# atributos de todos los recursos.
+tfplan
+*.tfplan
+
+# Archivo original del proyecto, ya desempaquetado en terraform/ y lambda/
+files.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Resultados descargados de Athena y respuestas de invocaciones locales
+*.csv
+respuesta.json
+
+# Configuración local de herramientas
+.claude/
+.codex/
+.agents/
+
+# Local
+.DS_Store
