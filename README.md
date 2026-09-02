@@ -525,6 +525,8 @@ AWS_PROFILE=portfolio aws lambda invoke \
 el límite de 100 MB escaneados por consulta.
 
 Consultar desde Athena con los ejemplos de [`queries.sql`](queries.sql).
+Los hallazgos del análisis sobre los datos reales están en
+[`ANALISIS.md`](ANALISIS.md).
 
 Para destruir todo: `terraform destroy`.
 
