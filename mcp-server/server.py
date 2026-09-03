@@ -499,13 +499,31 @@ def get_trends(
         # umbral simple pero no la corrección no es ruido cualquiera, es
         # un candidato a mirar. Colapsarla a "no significativo" perdería
         # señal útil; llamarla "significativa" la sobrevendería.
+        #
+        # `como_reportar` repite en cada fila lo que ya dice el docstring
+        # porque no es lo mismo: al redactar la respuesta, el modelo tiene
+        # el número delante y la descripción de la herramienta muy atrás.
+        # La restricción tiene que viajar pegada al dato o se pierde — un
+        # indicio enunciado como hecho ya ocurrió en uso real.
         p = fila["p_valor"]
         if significativa:
             fila["clasificacion"] = "significativo"
+            fila["como_reportar"] = (
+                "Se puede afirmar como cambio real."
+            )
         elif p is not None and p < estadistica.ALFA:
             fila["clasificacion"] = "indicio"
+            fila["como_reportar"] = (
+                "NO afirmar este cambio. Pasa el umbral simple pero no la "
+                "corrección por comparaciones múltiples, así que todavía es "
+                "compatible con el azar. Mencionar como pista a vigilar, "
+                "nunca como un hecho ni como una tendencia establecida."
+            )
         else:
             fila["clasificacion"] = "ruido"
+            fila["como_reportar"] = (
+                "NO reportar: indistinguible del azar."
+            )
 
     significativas = [m for m in metricas if m["significativo"]]
     indicios = [m for m in metricas if m["clasificacion"] == "indicio"]
@@ -795,6 +813,20 @@ def get_coaching_priorities(
     banderas = estadistica.ajustar_fdr([c["p_valor"] for c in comparaciones])
     for fila, significativa in zip(comparaciones, banderas):
         fila["significativo"] = significativa
+        d = fila["d_cohen"]
+        if not significativa or d is None or abs(d) < 0.2:
+            fila["como_reportar"] = (
+                "NO reportar como diferencia: está al nivel de sus pares."
+            )
+        elif abs(d) < 0.5:
+            fila["como_reportar"] = (
+                "Diferencia real pero de efecto chico: mencionarla con esa "
+                "cautela, sin presentarla como el problema principal."
+            )
+        else:
+            fila["como_reportar"] = (
+                "Diferencia real y de efecto relevante: se puede afirmar."
+            )
 
     def relevante(c):
         # Una diferencia real pero minúscula no es una prioridad: se
@@ -806,15 +838,22 @@ def get_coaching_priorities(
     peores.sort(key=lambda c: abs(c["d_cohen"]), reverse=True)
     mejores.sort(key=lambda c: abs(c["d_cohen"]), reverse=True)
 
+    aviso_foto = (
+        " Esta comparación es una foto del período completo, no una "
+        "tendencia: no dice si algo viene mejorando o empeorando. Para eso "
+        "está get_trends, y solo lo que ahí salga como 'significativo' se "
+        "puede afirmar como cambio en el tiempo."
+    )
+
     if peores:
         nota = (f"{len(peores)} métrica(s) por debajo de los pares de {rol} con "
                 "efecto al menos chico, ordenadas por tamaño de efecto. El orden "
                 "es la prioridad sugerida; las causas y el plan los pone el "
-                "asistente, no esta herramienta.")
+                "asistente, no esta herramienta." + aviso_foto)
     else:
         nota = (f"Ninguna métrica queda por debajo de los pares de {rol} con "
                 "efecto relevante: el rendimiento está a la altura del nivel "
-                "en el que juega.")
+                "en el que juega." + aviso_foto)
 
     return {
         "jugador": player or "(único rastreado)",
