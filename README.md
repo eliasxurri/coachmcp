@@ -282,6 +282,32 @@ simple y solo 3 sobreviven la corrección. Las otras 5 quedan como
 indicio: una caída del 51% en tiempo muerto (p=0,014) es demasiado
 interesante para tirarla, pero afirmarla como hecho sería sobrevender.
 
+### La instrucción viaja con el dato, no solo en el docstring
+
+**Problema.** La clasificación en tres niveles estaba explicada en los
+docstrings de las herramientas, y no alcanzó. En la primera conversación
+real contra el conector, el asistente enunció como hecho una métrica
+clasificada como `indicio`: dijo que la participación en kills venía
+"empeorando con el tiempo", cuando a 90 días no sobrevive la corrección y
+a 45 días es directamente ruido.
+
+**Decisión.** Cada fila devuelta incluye un campo `como_reportar` con la
+restricción pegada al número: qué se puede afirmar, qué es solo una pista
+y qué no debe reportarse. `get_coaching_priorities` agrega además, en su
+nota, que es una foto del período y no dice nada sobre la dirección en el
+tiempo — confundir la comparación con pares con una tendencia fue
+exactamente el error cometido.
+
+No es redundancia. Al redactar la respuesta, el modelo tiene el número
+delante y la descripción de la herramienta muchas pantallas atrás: una
+advertencia lejana no compite con una cifra concreta. `tests/test_reporte.py`
+fija el comportamiento.
+
+Vale notar que todo lo demás de esa conversación fue exacto —partidas,
+pares, porcentajes y tamaño de efecto coincidían con los datos—, y que el
+asistente separó por su cuenta la evidencia de su interpretación causal.
+El único punto débil fue el que la herramienta no defendía lo suficiente.
+
 ### Timeline: la única fuente que sí exige llamadas nuevas
 
 **Problema.** Todo lo anterior sale del resumen de la partida, que solo
