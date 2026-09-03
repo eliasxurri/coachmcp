@@ -197,7 +197,9 @@ gana el 56%, así que los rivales aparecen con winrate deprimido.
 **Roles secundarios sin muestra.** Top (17), mid (33) y support (65) dan
 indicios, no conclusiones.
 
-**Las métricas contra el rival de línea faltan en el 23% de las
-partidas.** Riot solo las calcula cuando identifica un oponente directo,
-lo que casi nunca ocurre en jungla. Las consultas cuentan cada métrica
-por separado y marcan esas filas con `cobertura_parcial`.
+**Las métricas contra el rival de línea están casi completas donde
+importa.** Cubren el 95,4% de las partidas de soloq, con la misma
+cobertura en todos los roles: jungla 95,4%, mid 97%, top 100%. Las
+ausencias son de modos sin líneas —Arena, ARAM, URF— y de remakes de
+menos de dos minutos. Aun así las consultas cuentan cada métrica por
+separado y marcan las filas con `cobertura_parcial`.

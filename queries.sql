@@ -233,9 +233,10 @@ ORDER BY ventana DESC;
 -- cuenta súbditos DE LÍNEA, así que da casi cero en jungla; para ese rol
 -- el equivalente es jungla_cs_antes_10.
 --
--- Las columnas de ventaja sobre el rival solo existen cuando Riot
--- identifica un oponente directo (~77% de las partidas), de ahí el
--- conteo aparte para no promediar sobre filas que no existen.
+-- Las columnas de ventaja sobre el rival cubren el 95-100% de las
+-- partidas de Grieta en todos los roles (jungla incluida). Faltan en los
+-- modos sin líneas —Arena, ARAM, URF— y en los remakes. El conteo aparte
+-- es para no promediar sobre esas filas.
 -- ---------------------------------------------------------------------
 SELECT
     rol,

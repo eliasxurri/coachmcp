@@ -25,7 +25,17 @@ ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "lol-pipeline")
 ATHENA_DATABASE = os.environ.get("ATHENA_DATABASE", "lol_pipeline_db")
 
 # Nombres legibles para los queue IDs que aparecen en el caso de uso.
-QUEUES = {420: "ranked solo/duo", 440: "ranked flex", 450: "ARAM", 400: "normal draft", 430: "normal blind"}
+QUEUES = {
+    420: "ranked solo/duo",
+    440: "ranked flex",
+    450: "ARAM",
+    400: "normal draft",
+    430: "normal blind",
+    900: "URF",
+    1700: "Arena",
+    1710: "Arena",
+    1750: "Arena",
+}
 
 athena = boto3.client("athena", region_name=AWS_REGION)
 
@@ -271,10 +281,11 @@ def get_champion_stats(
 # mejores ni peores por sí solas (pueden ser remontadas o estancamientos),
 # pero el dato ayuda al asistente a interpretar el resto.
 #
-# Las tres métricas "contra el rival de línea" solo existen cuando Riot
-# identifica un oponente directo (~77% de las partidas, casi nunca en
-# jungla). Por eso cada métrica lleva su propio conteo: usar el total de
-# la ventana inflaría la muestra de las columnas dispersas.
+# Las tres métricas "contra el rival de línea" cubren el 95-100% de las
+# partidas de Grieta en todos los roles, jungla incluida. Faltan solo en
+# modos sin líneas (Arena, ARAM, URF) y en remakes. Aun así cada métrica
+# lleva su propio conteo: el filtro de cola las deja casi completas, pero
+# usar el total de la ventana igual inflaría la muestra.
 METRICAS = [
     # Resultado y combate
     ("kda", "mayor", None),

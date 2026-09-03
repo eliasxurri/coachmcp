@@ -153,11 +153,26 @@ nuevas en NULL para siempre. Reconstruir desde raw tomó una consulta.
 
 **Cobertura.** 26 columnas están completas en las 800 partidas y la
 mayoría de `challenges` llega a 799 (una partida vieja no lo trae). Las
-cinco métricas de ventaja sobre el rival de línea solo aparecen en el
-77%: Riot únicamente las calcula cuando hay un oponente directo
-identificable, lo que casi nunca pasa en jungla. Las consultas de
-tendencias cuentan cada métrica por separado en vez de asumir el total
-de la ventana, y marcan esas filas con `cobertura_parcial`.
+cinco métricas de ventaja sobre el rival de línea aparecen en el 77% del
+total, pero ese número engaña: **dentro de la Grieta la cobertura es del
+95% al 100% en todos los roles**, jungla incluida (95,4%).
+
+Las ausencias se concentran en modos sin líneas, que no tienen rival
+directo que comparar: Arena (140 partidas), ARAM (12) y URF (1) dan 0%.
+El 5% restante dentro de soloq son remakes, partidas de 1,8 minutos de
+promedio que terminan antes de que haya nada que medir.
+
+| Cola | Partidas | Con dato |
+|---|---|---|
+| Ranked solo/duo (420) | 525 | 95,4% |
+| Ranked flex (440) | 113 | 96,5% |
+| Normal draft (400) | 9 | 88,9% |
+| Arena (1700/1750) | 140 | 0% |
+| ARAM (450) | 12 | 0% |
+
+Aun así, las consultas de tendencias cuentan cada métrica por separado en
+vez de asumir el total de la ventana, y marcan esas filas con
+`cobertura_parcial`: la diferencia es chica pero real.
 
 ### Solo ranked solo/duo
 
