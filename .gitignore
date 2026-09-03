@@ -4,8 +4,9 @@
 *.tfstate.*
 *.tfvars
 *.tfvars.json
-.terraform.lock.hcl
 terraform/build/
+# Config del backend: lleva el bucket propio de cada quien.
+backend.hcl
 # Los planes guardados son artefactos binarios y llevan dentro los
 # atributos de todos los recursos.
 tfplan

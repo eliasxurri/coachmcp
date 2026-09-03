@@ -621,17 +621,54 @@ cliente del juego (`gameName#tagLine`). `terraform.tfvars` está en
 Quien juegue fuera de América debe ajustar también `riot_routing_region`
 (`americas`, `europe`, `asia` o `sea`).
 
-### 2. Desplegar
+### 2. Estado remoto
+
+El estado de Terraform vive en S3, no en disco. Con estado local el
+proyecto solo se puede operar desde la máquina que tiene el archivo:
+clonarlo en otra da un estado vacío, y un `apply` ahí intentaría recrear
+los 50 recursos y fallaría a medias contra los que ya existen.
+
+El bucket tiene que existir antes del primer `init`, y conviene con
+versionado: es lo que permite recuperar el estado si un apply lo corrompe.
 
 ```bash
-terraform init
+CUENTA=$(aws sts get-caller-identity --query Account --output text)
+BUCKET="lol-pipeline-tfstate-$CUENTA"
+
+aws s3api create-bucket --bucket "$BUCKET" --region "$AWS_REGION" \
+  --create-bucket-configuration LocationConstraint="$AWS_REGION"
+aws s3api put-bucket-versioning --bucket "$BUCKET" \
+  --versioning-configuration Status=Enabled
+```
+
+Después se copia la plantilla y se pone ese bucket:
+
+```bash
+cp backend.hcl.example backend.hcl
+```
+
+`backend.hcl` está en `.gitignore`. El bloque `backend "s3" {}` de
+`main.tf` va vacío a propósito: un backend no admite variables, así que
+hardcodear un bucket con ID de cuenta dejaría el repo inservible para
+cualquier otro.
+
+El bloqueo es nativo de S3 (`use_lockfile`), sin tabla de DynamoDB. Si
+dos máquinas aplican a la vez, la segunda recibe un 412 y se detiene.
+
+### 3. Desplegar
+
+```bash
+terraform init -backend-config=backend.hcl
 terraform apply
 ```
 
-Crea unos 40 recursos y tarda un par de minutos. El bucket lleva el ID
-de cuenta en el nombre porque S3 exige unicidad global.
+Crea unos 50 recursos y tarda un par de minutos. El bucket de datos lleva
+el ID de cuenta en el nombre porque S3 exige unicidad global.
 
-### 3. Cargar la API key
+En cualquier otra máquina, a partir de acá basta repetir `terraform init
+-backend-config=backend.hcl`: el estado se descarga solo.
+
+### 4. Cargar la API key
 
 Se carga aparte, nunca por Terraform: el state guarda todos los valores
 **en texto plano**, así que una key puesta en el código o en un `.tfvars`
@@ -647,7 +684,7 @@ aws ssm put-parameter \
 
 Este es el comando a repetir cada vez que expire la development key.
 
-### 4. Verificar
+### 5. Verificar
 
 ```bash
 aws lambda invoke --function-name lol-pipeline-ingesta respuesta.json \
@@ -660,7 +697,7 @@ Debe responder con `total_ingeridas` mayor que cero. Si devuelve un error
 A partir de acá EventBridge dispara la ingesta cada 30 minutos y el
 curado a Parquet en el mismo ciclo, sin intervención.
 
-### 5. Servidor MCP
+### 6. Servidor MCP
 
 ```bash
 cd ../mcp-server
