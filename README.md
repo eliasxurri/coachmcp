@@ -12,30 +12,71 @@ Este documento explica esas decisiones.
 
 ## Arquitectura
 
-```
-EventBridge (cada 30 min)
-      │
-      ▼
-  Lambda (Python 3.12)
-      ├── Parameter Store ──── API key (SecureString)
-      ├── DynamoDB ─────────── watermark de ingesta
-      ├── Riot API ─────────── PUUID → match IDs → detalle
-      └── S3 ───────────────── partidas crudas particionadas
-                                    │
-                          Glue Data Catalog
-                                    │
-                         Lambda de curado
-                                    │
-                         Athena → Parquet
-                                    │
-                              MCP (stdio)
+```mermaid
+flowchart LR
+    RIOT["API de Riot<br/>límite 100 req / 2 min"]
+
+    subgraph s1 ["1 · Ingesta"]
+            ING["Lambda ingesta<br/>cada 30 min"]
+        TL["Lambda timeline<br/>minutos 15 y 45"]
+    end
+
+    subgraph s2 ["2 · Cruda · 825 MB"]
+            RAW["raw/<br/>75 MB"]
+        TLR["timelines/<br/>750 MB"]
+    end
+
+    subgraph s3 ["3 · Curado · ETL 5 GB"]
+        CUR["Lambda curado · cada 30 min<br/>3 INSERT INTO en Athena"]
+    end
+
+    subgraph s4 ["4 · Curada · Parquet · 1,4 MB"]
+            C1["matches_curated<br/>83 columnas"]
+        C2["peers_curated<br/>baseline del elo"]
+        C3["timeline_frames<br/>por minuto"]
+    end
+
+    subgraph s5 ["5 · Consulta · interactivo 100 MB"]
+        MCP["Servidor MCP · 7 herramientas"]
+    end
+
+    SSM["Parameter Store<br/>API key cifrada"]
+    DDB["DynamoDB<br/>watermark y lock"]
+
+    RIOT --> ING
+    RIOT --> TL
+    SSM -.-> ING
+    SSM -.-> TL
+    DDB -.-> ING
+    DDB -.-> CUR
+
+    ING --> RAW
+    TL --> TLR
+    RAW --> CUR
+    TLR --> CUR
+    CUR --> C1
+    CUR --> C2
+    CUR --> C3
+    C1 --> MCP
+    C2 --> MCP
+    C3 --> MCP
+    MCP --> LLM["Asistente conversacional"]
+
+    style RIOT fill:#f9e79f,stroke:#b7950b
+    style LLM fill:#d5f5e3,stroke:#1e8449
+    style s2 fill:#fef9e7,stroke:#d4ac0d
+    style s4 fill:#eaf2f8,stroke:#2874a6
 ```
 
-**Flujo:** EventBridge dispara la Lambda cada 30 minutos. La función lee la
-API key desde Parameter Store, consulta en DynamoDB qué partidas ya se
-ingirieron, pide a Riot solo las nuevas, y las escribe en S3 particionadas
-por jugador y fecha. Registra la partición en el catálogo de Glue para que
-Athena pueda consultarla.
+**Flujo.** EventBridge dispara la ingesta cada 30 minutos: lee la API key
+desde Parameter Store, consulta en DynamoDB qué partidas ya se ingirieron,
+pide a Riot solo las nuevas y las escribe en S3 particionadas por jugador y
+fecha. La descarga de timelines corre desfasada 15 minutos porque comparte
+el límite de la misma key. El curado proyecta ambas capas crudas a Parquet
+con consultas de Athena, y el servidor MCP consulta solo esa capa curada.
+
+Las dos capas crudas pesan **825 MB**; la curada, que es la que se consulta,
+**1,4 MB**. Esa diferencia es lo que mantiene el costo cerca de cero.
 
 ---
 
@@ -211,13 +252,30 @@ umbral entre el número de pruebas, escondería mejoras reales: aquí
 importa más no perderlas que blindarse contra un único falso positivo.
 
 El resultado se reporta en tres niveles en vez de un binario, porque
-colapsar a "no significativo" perdía señal útil para un coach:
+colapsar a "no significativo" perdía señal útil para un coach. Este es el
+camino completo que recorre cada métrica antes de llegar al asistente:
 
-| Clasificación | Significa |
-|---|---|
-| `significativo` | Sobrevive la corrección; se puede afirmar |
-| `indicio` | Pasa el umbral simple pero no la corrección; pista a vigilar |
-| `ruido` | Indistinguible del azar |
+```mermaid
+flowchart LR
+    A["Métrica en dos<br/>ventanas temporales"] --> B{"¿qué tipo<br/>de variable?"}
+    B -- "binaria<br/>(winrate)" --> C["z de dos<br/>proporciones"]
+    B -- "continua<br/>(CS, oro, muertes)" --> D["t de Welch<br/>distribución t exacta"]
+    C --> E["p-valor crudo"]
+    D --> E
+    E --> F["Benjamini-Hochberg<br/>sobre las 23 pruebas juntas"]
+    F --> G{"¿sobrevive la<br/>corrección?"}
+    G -- sí --> H["significativo<br/>se puede afirmar"]
+    G -- "no, pero p &lt; 0,05" --> I["indicio<br/>pista a vigilar"]
+    G -- no --> J["ruido<br/>no se reporta"]
+
+    style H fill:#d5f5e3,stroke:#1e8449
+    style I fill:#fdebd0,stroke:#b9770e
+    style J fill:#f2f3f4,stroke:#909497
+```
+
+El paso de Welch no es un detalle: no se puede asumir varianza igual
+entre ventanas, porque cambiar de campeones cambia la dispersión de casi
+todas las métricas.
 
 **Resultado.** Sobre los datos reales, 8 métricas pasaban el umbral
 simple y solo 3 sobreviven la corrección. Las otras 5 quedan como
@@ -249,6 +307,33 @@ Tres decisiones acotan ese costo:
 - **Proyección obligatoria a Parquet.** Consultar los timelines crudos
   no es viable: los 800 pesan ~840 MB. `timeline_frames` los aplana a
   una fila por minuto con el jugador y su rival de línea lado a lado.
+
+**Cómo se empareja al rival.** El timeline no dice quién juega contra
+quién: sus frames vienen indexados por `participantId`, un número del 1
+al 10. Resolverlo cruza tres fuentes, y es lo que convierte un JSON
+gigante en filas comparables:
+
+```mermaid
+flowchart LR
+    TLJ["timeline JSON<br/>1,1 MB por partida"]
+    TLJ --> IDS["info.participants<br/>participantId → puuid"]
+    TLJ --> FRM["info.frames · uno por minuto<br/>oro, XP, CS por participantId"]
+
+    MCU["matches_curated<br/>rol del jugador"] --> RIV
+    PCU["peers_curated<br/>rol de los 10"] --> RIV["Rival de línea:<br/>mismo rol, distinto puuid"]
+
+    IDS --> J["Join por match_id"]
+    FRM --> J
+    RIV --> J
+    J --> OUT["timeline_frames<br/>jugador y rival lado a lado<br/>diff_oro · diff_cs · diff_xp"]
+
+    style TLJ fill:#fef9e7,stroke:#d4ac0d
+    style OUT fill:#d5f5e3,stroke:#1e8449
+```
+
+El `participantId` es dinámico por partida, así que la clave del frame no
+se puede escribir en una ruta JSON constante: hay que castear
+`participantFrames` a un `MAP` y buscar por valor.
 
 **Resultado.** Aparece la curva que el resumen no puede dar. En una
 partida de mid: +13 CS en el minuto 5, oro empatado en el 10, y +1.919
@@ -290,6 +375,26 @@ de ranking.
 La tabla `peers_curated` guarda los 10 participantes con las métricas
 mínimas para comparar, particionada por rol porque toda comparación es
 dentro del mismo rol: el CS de un jungla no se compara con el de un mid.
+
+```mermaid
+flowchart LR
+    P["Una partida<br/>del jugador"] --> M["El matchmaking<br/>empareja por MMR"]
+    M --> J["El jugador<br/>1 fila"]
+    M --> O["Los otros 9<br/>mismo elo, por definición"]
+    J --> MC["matches_curated<br/>83 columnas"]
+    O --> PC["peers_curated<br/>partición por rol"]
+    MC --> CMP{"Comparación<br/>dentro del mismo rol"}
+    PC --> CMP
+    CMP --> R["d de Cohen<br/>+ p-valor"]
+    R --> PRI["Prioridades<br/>ordenadas por efecto"]
+
+    style O fill:#d6eaf8,stroke:#2874a6
+    style PRI fill:#d5f5e3,stroke:#1e8449
+```
+
+Sobre 800 partidas eso da 6.468 filas de baseline: cada partida aporta
+nueve observaciones de jugadores del mismo nivel, gratis, en el mismo
+payload que ya se estaba guardando.
 
 **Resultado.** Sobre los datos reales, en jungla el jugador farmea por
 encima de sus pares (CS/min +10%, ventaja de CS sobre el rival +84%)
