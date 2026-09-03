@@ -25,6 +25,7 @@ AWS_REGION = os.environ.get("AWS_REGION", "sa-east-1")
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "lol-pipeline")
 ATHENA_DATABASE = os.environ.get("ATHENA_DATABASE", "lol_pipeline_db")
 WATERMARK_TABLE = os.environ.get("WATERMARK_TABLE", "lol-pipeline-watermark")
+LP_TABLE = os.environ.get("LP_TABLE", "lol-pipeline-lp-historico")
 
 # Nombres legibles para los queue IDs que aparecen en el caso de uso.
 QUEUES = {
@@ -287,6 +288,120 @@ def get_rank() -> dict:
 APEX_KEY_PREFIJO = "__apex_"
 
 TIERS_APEX = ("MASTER", "GRANDMASTER", "CHALLENGER")
+
+
+# Una ganancia así de grande respecto de la típica no se explica por MMR:
+# es el doble de puntos por ganar en rol prioritario (Aegis of Valor).
+FACTOR_BONIFICACION = 1.7
+
+
+@mcp.tool()
+def get_lp_progress(days: int = 30) -> dict:
+    """
+    Cuánto LP gana por victoria y pierde por derrota este jugador, medido
+    de su propio histórico en vez de estimado.
+
+    Es el número que decide si una meta de ascenso es alcanzable: con el
+    mismo winrate, el resultado cambia de "alcanzable" a "imposible" según
+    cuánto LP mueva cada partida, y eso depende del MMR de cada uno.
+
+    Solo usa intervalos donde ocurrió exactamente una partida, para poder
+    atribuir el cambio sin ambigüedad; los intervalos con varias se
+    descartan y se informan aparte.
+
+    Riot otorga LP doble al ganar en un rol prioritario (autofill), así que
+    se reporta la mediana y no el promedio, y las ganancias muy por encima
+    de lo típico se listan por separado: promediarlas haría parecer que se
+    sube más rápido de lo que se sube en una partida normal.
+
+    Args:
+        days: ventana hacia atrás en días.
+    """
+    puuid = resolver_puuid(None)
+    desde = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+
+    from boto3.dynamodb.conditions import Key
+
+    respuesta = dynamodb.Table(LP_TABLE).query(
+        KeyConditionExpression=Key("puuid").eq(puuid) & Key("momento").gte(desde),
+        ScanIndexForward=True,
+    )
+    puntos = respuesta.get("Items") or []
+
+    if len(puntos) < 2:
+        return {
+            "puntos_en_la_serie": len(puntos),
+            "medible": False,
+            "nota": ("Todavía no hay histórico suficiente. La serie se arma "
+                     "sola con cada partida jugada; hacen falta al menos dos "
+                     "puntos con una partida en medio. NO estimes el LP por "
+                     "partida: sin este dato, cualquier plan de ascenso es "
+                     "una conjetura, y conviene decirlo en vez de suponer."),
+        }
+
+    victorias, derrotas, ambiguos = [], [], 0
+    for previo, actual in zip(puntos, puntos[1:]):
+        d_lp = int(actual["lp"]) - int(previo["lp"])
+        d_v = int(actual.get("victorias", 0)) - int(previo.get("victorias", 0))
+        d_d = int(actual.get("derrotas", 0)) - int(previo.get("derrotas", 0))
+
+        # Un ascenso o descenso de tier reinicia los LP: el salto no mide
+        # nada sobre la partida.
+        if previo.get("tier") != actual.get("tier"):
+            continue
+
+        if d_v == 1 and d_d == 0:
+            victorias.append(d_lp)
+        elif d_d == 1 and d_v == 0:
+            derrotas.append(-d_lp)
+        elif d_v + d_d > 1:
+            ambiguos += 1
+
+    def mediana(valores):
+        if not valores:
+            return None
+        ordenados = sorted(valores)
+        medio = len(ordenados) // 2
+        if len(ordenados) % 2:
+            return ordenados[medio]
+        return round((ordenados[medio - 1] + ordenados[medio]) / 2, 1)
+
+    lp_victoria = mediana(victorias)
+    lp_derrota = mediana(derrotas)
+    bonificadas = ([v for v in victorias if lp_victoria and v >= lp_victoria * FACTOR_BONIFICACION]
+                   if lp_victoria else [])
+
+    resultado = {
+        "ventana_dias": days,
+        "puntos_en_la_serie": len(puntos),
+        "medible": bool(victorias and derrotas),
+        "lp_por_victoria": lp_victoria,
+        "lp_por_derrota": lp_derrota,
+        "victorias_medidas": len(victorias),
+        "derrotas_medidas": len(derrotas),
+        "intervalos_ambiguos": ambiguos,
+        "victorias_bonificadas": {
+            "cantidad": len(bonificadas),
+            "valores": sorted(bonificadas),
+            "nota": ("Ganancias muy por encima de la mediana, compatibles con "
+                     "el LP doble por rol prioritario. Quedan fuera de la "
+                     "mediana a propósito: no representan una partida típica."),
+        },
+    }
+
+    if lp_victoria is not None and lp_derrota is not None:
+        resultado["nota"] = (
+            "Con estos valores, el LP neto por partida depende del winrate: "
+            "neto = winrate * lp_por_victoria - (1 - winrate) * lp_por_derrota. "
+            "Usá eso para calcular partidas necesarias, y contrastalo con "
+            "get_apex_cutoff, teniendo en cuenta que el corte se mueve."
+        )
+    else:
+        resultado["nota"] = (
+            "Faltan victorias o derrotas medibles en la ventana. No estimes "
+            "el LP por partida: decí que todavía no alcanza el histórico."
+        )
+    return resultado
 
 
 @mcp.tool()

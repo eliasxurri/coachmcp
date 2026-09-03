@@ -339,6 +339,38 @@ lo que valida de paso toda la cadena. Y le da sentido al baseline de
 pares: cuando dice "por debajo de tus pares", esos pares son jugadores del
 mismo rango.
 
+### Medir el LP por partida en vez de estimarlo
+
+**Problema.** Al armar un plan de ascenso, la única variable que decidía
+todo era la que no teníamos: cuánto LP mueve cada partida. Con el mismo
+winrate del 54%, la meta pasa de 106 partidas (alcanzable) a 277
+(inviable) según si se gana +20/−15 o +18/−18. Cualquier respuesta era una
+conjetura presentada como cálculo.
+
+**Decisión.** `get_rank` ya consultaba el LP cada media hora, pero lo
+sobrescribía. Ahora una tabla aparte guarda una fila **por cada cambio**
+—no por corrida, que entre partidas no se mueve— y `get_lp_progress` mide
+el valor real.
+
+La atribución solo usa intervalos donde ocurrió **exactamente una
+partida**, comparando el récord de la temporada entre puntos consecutivos.
+Los intervalos con varias se descartan y se informan aparte: es preferible
+medir menos y bien.
+
+**El LP doble por rol prioritario.** Riot duplica los puntos al ganar en un
+rol prioritario (autofill), así que las ganancias no son una sola
+población. Se reporta la **mediana y no el promedio**, y las ganancias muy
+por encima de lo típico se listan por separado. Se detecta por su magnitud
+y no por el autofill en sí: mide el efecto en vez de suponer el mecanismo,
+que es más robusto ante cambios de reglas.
+
+Un ascenso o descenso de tier reinicia los LP, así que esos saltos se
+ignoran: no miden nada sobre la partida.
+
+**Mientras no alcance, la herramienta lo dice.** Con menos de dos puntos
+devuelve `medible: false` y una instrucción explícita de no estimar. Es
+justamente el caso en que la respuesta anterior falló.
+
 ### Grandmaster no es un umbral de LP
 
 **Problema.** Al pedirle un plan para llegar a Grandmaster, el asistente
@@ -897,6 +929,8 @@ Herramientas:
 - `get_rank()` — tier, división, LP y récord de la temporada
 - `get_apex_cutoff()` — LP que hace falta para Grandmaster y Challenger,
   y a qué distancia está el jugador
+- `get_lp_progress(days)` — cuánto LP gana por victoria y pierde por
+  derrota, medido del propio histórico
 
 Las mismas 7 se sirven por HTTP para conectarlas a Claude.ai sin instalar
 nada: ver [Servidor MCP remoto](#servidor-mcp-remoto-beta).

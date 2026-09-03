@@ -67,6 +67,7 @@ resource "aws_lambda_function" "mcp" {
     variables = {
       USERS_TABLE      = aws_dynamodb_table.usuarios.name
       WATERMARK_TABLE  = aws_dynamodb_table.watermark.name
+      LP_TABLE         = aws_dynamodb_table.lp_historico.name
       ATHENA_WORKGROUP = aws_athena_workgroup.lol.name
       ATHENA_DATABASE  = aws_glue_catalog_database.lol.name
 
@@ -253,6 +254,13 @@ data "aws_iam_policy_document" "mcp_permissions" {
     effect    = "Allow"
     actions   = ["dynamodb:GetItem"]
     resources = [aws_dynamodb_table.watermark.arn]
+  }
+
+  statement {
+    sid       = "LeerHistoricoLP"
+    effect    = "Allow"
+    actions   = ["dynamodb:Query"]
+    resources = [aws_dynamodb_table.lp_historico.arn]
   }
 }
 

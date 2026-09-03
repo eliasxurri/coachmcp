@@ -36,6 +36,7 @@ dynamodb = boto3.resource("dynamodb")
 
 BUCKET = os.environ["BUCKET_NAME"]
 WATERMARK_TABLE = os.environ["WATERMARK_TABLE"]
+LP_TABLE = os.environ.get("LP_TABLE", "")
 API_KEY_PARAM = os.environ["API_KEY_PARAM"]
 GLUE_DATABASE = os.environ["GLUE_DATABASE"]
 GLUE_TABLE = os.environ["GLUE_TABLE"]
@@ -300,6 +301,13 @@ def actualizar_rango(puuid: str, plataforma: str, api_key: str) -> None:
         logger.warning("No se pudo obtener el rango de %s", puuid[:8], exc_info=True)
         return
 
+    try:
+        actual = dynamodb.Table(WATERMARK_TABLE).get_item(
+            Key={"puuid": puuid}
+        ).get("Item") or {}
+    except ClientError:
+        actual = {}
+
     colas = {
         e["queueType"]: {
             "tier": e.get("tier"),
@@ -331,6 +339,61 @@ def actualizar_rango(puuid: str, plataforma: str, api_key: str) -> None:
 
     solo = colas.get("RANKED_SOLO_5x5", {})
     logger.info("Rango de %s: %s %s", puuid[:8], solo.get("tier"), solo.get("division"))
+    registrar_lp(puuid, solo)
+
+
+def ultimo_punto_lp(puuid: str) -> dict:
+    """Último punto anotado del histórico, o vacío si no hay ninguno."""
+    respuesta = dynamodb.Table(LP_TABLE).query(
+        KeyConditionExpression=boto3.dynamodb.conditions.Key("puuid").eq(puuid),
+        ScanIndexForward=False,
+        Limit=1,
+    )
+    items = respuesta.get("Items") or []
+    return items[0] if items else {}
+
+
+def registrar_lp(puuid: str, solo: dict) -> None:
+    """
+    Anota un punto del histórico de LP, solo cuando cambió.
+
+    Entre partidas el valor no se mueve y guardar repetidos solo agregaría
+    ruido a la serie. Con los puntos y sus marcas de tiempo se puede después
+    cruzar cada salto contra la partida que lo produjo, que es lo que
+    permite medir el LP por victoria en vez de suponerlo.
+
+    Guarda también el tier: un ascenso o descenso reinicia los LP y sin esa
+    referencia un salto de 311 a 0 parecería una caída catastrófica.
+    """
+    lp = solo.get("lp")
+    if not LP_TABLE or lp is None:
+        return
+
+    try:
+        anterior = ultimo_punto_lp(puuid)
+    except ClientError:
+        logger.warning("No se pudo leer el histórico de LP", exc_info=True)
+        return
+
+    # Se compara contra la propia serie y no contra el rango guardado, para
+    # que el primer punto quede anotado aunque el LP no haya cambiado: sin
+    # esa referencia inicial, el primer salto no tendría desde dónde medirse.
+    if anterior and int(anterior.get("lp", -1)) == lp \
+            and anterior.get("tier") == solo.get("tier"):
+        return
+
+    try:
+        dynamodb.Table(LP_TABLE).put_item(Item={
+            "puuid": puuid,
+            "momento": int(time.time()),
+            "lp": lp,
+            "tier": solo.get("tier"),
+            "division": solo.get("division"),
+            "victorias": solo.get("victorias"),
+            "derrotas": solo.get("derrotas"),
+        })
+    except ClientError:
+        logger.warning("No se pudo anotar el LP de %s", puuid[:8], exc_info=True)
 
 
 def guardar_partida(puuid: str, match: dict) -> tuple[str, bool]:

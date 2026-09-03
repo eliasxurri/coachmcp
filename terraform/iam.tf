@@ -54,6 +54,17 @@ data "aws_iam_policy_document" "lambda_permissions" {
     resources = [aws_dynamodb_table.watermark.arn]
   }
 
+  # Histórico de LP: solo escritura y lectura de las últimas filas.
+  statement {
+    sid    = "HistoricoLP"
+    effect = "Allow"
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:Query",
+    ]
+    resources = [aws_dynamodb_table.lp_historico.arn]
+  }
+
   # Leer la API key de Riot desde Parameter Store.
   statement {
     sid       = "LeerApiKey"

@@ -59,6 +59,7 @@ resource "aws_lambda_function" "ingesta" {
     variables = {
       BUCKET_NAME     = aws_s3_bucket.raw.bucket
       WATERMARK_TABLE = aws_dynamodb_table.watermark.name
+      LP_TABLE        = aws_dynamodb_table.lp_historico.name
       API_KEY_PARAM   = local.api_key_param
       GLUE_DATABASE   = aws_glue_catalog_database.lol.name
       GLUE_TABLE      = aws_glue_catalog_table.matches_raw.name
