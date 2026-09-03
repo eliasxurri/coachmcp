@@ -46,6 +46,9 @@ data "aws_iam_policy_document" "lambda_permissions" {
     actions = [
       "dynamodb:GetItem",
       "dynamodb:PutItem",
+      # UpdateItem porque el item del jugador guarda dos cosas —watermark y
+      # rango— y un PutItem borraría la que no se esté escribiendo.
+      "dynamodb:UpdateItem",
       "dynamodb:DeleteItem",
     ]
     resources = [aws_dynamodb_table.watermark.arn]

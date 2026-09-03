@@ -201,5 +201,50 @@ class ExecutionLockTests(unittest.TestCase):
             handler.adquirir_bloqueo(None)
 
 
+class RangoTests(unittest.TestCase):
+    def test_deriva_la_plataforma_del_match_id(self):
+        """League-V4 enruta por plataforma, y el match_id ya la lleva."""
+        handler = load_handler()
+        self.assertEqual(handler.plataforma_de("LA2_1621285511"), "la2")
+        self.assertEqual(handler.plataforma_de("EUW1_7001"), "euw1")
+        for invalido in ["", "singuion", "_1234"]:
+            self.assertIsNone(handler.plataforma_de(invalido), invalido)
+
+    def test_un_fallo_de_la_api_no_tumba_la_ingesta(self):
+        handler = load_handler()
+        handler.riot_get = MagicMock(side_effect=handler.RiotAPIError("503"))
+        handler.actualizar_rango("P" * 78, "la2", "key")  # no debe levantar
+        handler.dynamodb.Table.return_value.update_item.assert_not_called()
+
+    def test_un_fallo_al_guardar_tampoco_tumba_la_ingesta(self):
+        """El rango es un extra: nunca puede costar la ingesta de partidas."""
+        handler = load_handler()
+        handler.riot_get = MagicMock(return_value=[
+            {"queueType": "RANKED_SOLO_5x5", "tier": "MASTER", "rank": "I",
+             "leaguePoints": 311, "wins": 200, "losses": 169}
+        ])
+        handler.dynamodb.Table.return_value.update_item.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException"}}, "UpdateItem"
+        )
+        handler.actualizar_rango("P" * 78, "la2", "key")  # no debe levantar
+
+    def test_guarda_las_colas_de_ranked(self):
+        handler = load_handler()
+        handler.riot_get = MagicMock(return_value=[
+            {"queueType": "RANKED_SOLO_5x5", "tier": "MASTER", "rank": "I",
+             "leaguePoints": 311, "wins": 200, "losses": 169},
+            {"queueType": "RANKED_FLEX_SR", "tier": "PLATINUM", "rank": "III",
+             "leaguePoints": 83, "wins": 31, "losses": 28},
+        ])
+        handler.actualizar_rango("P" * 78, "la2", "key")
+        kwargs = handler.dynamodb.Table.return_value.update_item.call_args.kwargs
+        guardado = kwargs["ExpressionAttributeValues"][":r"]
+        self.assertEqual(guardado["RANKED_SOLO_5x5"]["tier"], "MASTER")
+        self.assertEqual(guardado["RANKED_SOLO_5x5"]["lp"], 311)
+        self.assertIn("RANKED_FLEX_SR", guardado)
+        # La llamada tiene que ir al host de plataforma, no al regional.
+        self.assertIn("la2.api.riotgames.com", handler.riot_get.call_args.kwargs["base"])
+
+
 if __name__ == "__main__":
     unittest.main()

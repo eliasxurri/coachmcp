@@ -104,14 +104,16 @@ def liberar_bloqueo(owner: str, lock_key: str = INCREMENTAL_LOCK_KEY) -> None:
         logger.warning("El lock de ingesta ya había expirado o cambiado de dueño")
 
 
-def riot_get(path: str, api_key: str, params: dict | None = None) -> dict | list:
+def riot_get(
+    path: str, api_key: str, params: dict | None = None, base: str | None = None
+) -> dict | list:
     """
     Llama a la API de Riot con reintento ante 429.
 
     La API devuelve el header Retry-After cuando aplica throttling,
     así que se respeta ese valor en vez de adivinar el backoff.
     """
-    url = f"{BASE_URL}{path}"
+    url = f"{base or BASE_URL}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
 
@@ -185,15 +187,86 @@ def leer_watermark(puuid: str) -> set[str]:
 
 
 def guardar_watermark(puuid: str, match_ids: set[str]) -> None:
-    """Persiste los últimos 100 match IDs procesados."""
+    """
+    Persiste los últimos 100 match IDs procesados.
+
+    Con update_item y no put_item: el item del jugador también guarda su
+    rango, y un put lo borraría en cada corrida.
+    """
     tabla = dynamodb.Table(WATERMARK_TABLE)
-    tabla.put_item(
-        Item={
-            "puuid": puuid,
-            "processed_match_ids": sorted(match_ids)[-100:],
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
+    tabla.update_item(
+        Key={"puuid": puuid},
+        UpdateExpression="SET processed_match_ids = :ids, updated_at = :ahora",
+        ExpressionAttributeValues={
+            ":ids": sorted(match_ids)[-100:],
+            ":ahora": datetime.now(timezone.utc).isoformat(),
+        },
     )
+
+
+def plataforma_de(match_id: str) -> str | None:
+    """
+    Deriva el host de plataforma del prefijo del match ID.
+
+    League-V4 enruta por plataforma (la2.api.riotgames.com) y no por región
+    (americas), que es la que usa match-v5. No hace falta configurarlo: el
+    match_id ya lo dice, "LA2_1621285511" -> "la2".
+    """
+    prefijo, _, resto = match_id.partition("_")
+    return prefijo.lower() if prefijo and resto else None
+
+
+def actualizar_rango(puuid: str, plataforma: str, api_key: str) -> None:
+    """
+    Guarda el rango actual del jugador junto a su watermark.
+
+    Es una llamada por jugador y por corrida, y se resuelve acá y no en el
+    servidor MCP a propósito: así la consulta sigue sin depender de la API
+    de Riot y funciona aunque la key esté expirada.
+
+    Un fallo acá no puede tumbar la ingesta: el rango es un extra.
+    """
+    try:
+        entradas = riot_get(
+            f"/lol/league/v4/entries/by-puuid/{puuid}",
+            api_key,
+            base=f"https://{plataforma}.api.riotgames.com",
+        )
+    except (RiotAPIError, urllib.error.URLError):
+        logger.warning("No se pudo obtener el rango de %s", puuid[:8], exc_info=True)
+        return
+
+    colas = {
+        e["queueType"]: {
+            "tier": e.get("tier"),
+            "division": e.get("rank"),
+            "lp": e.get("leaguePoints"),
+            "victorias": e.get("wins"),
+            "derrotas": e.get("losses"),
+        }
+        for e in entradas
+        if e.get("queueType")
+    }
+    if not colas:
+        return
+
+    try:
+        dynamodb.Table(WATERMARK_TABLE).update_item(
+            Key={"puuid": puuid},
+            UpdateExpression="SET rango = :r, rango_actualizado = :ahora",
+            ExpressionAttributeValues={
+                ":r": colas,
+                ":ahora": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except ClientError:
+        # No basta con atrapar los fallos de la API de Riot: si la escritura
+        # falla, tampoco puede caerse la ingesta de partidas por un extra.
+        logger.warning("No se pudo guardar el rango de %s", puuid[:8], exc_info=True)
+        return
+
+    solo = colas.get("RANKED_SOLO_5x5", {})
+    logger.info("Rango de %s: %s %s", puuid[:8], solo.get("tier"), solo.get("division"))
 
 
 def guardar_partida(puuid: str, match: dict) -> tuple[str, bool]:
@@ -310,6 +383,14 @@ def procesar_jugador(
         {"start": start, "count": count},
     )
     time.sleep(REQUEST_DELAY_SECONDS)
+
+    # El rango se refresca aunque no haya partidas nuevas: es lo que suele
+    # cambiar entre corridas cuando el jugador no jugó desde la última.
+    if actualizar_watermark and ids_recientes:
+        plataforma = plataforma_de(ids_recientes[0])
+        if plataforma:
+            actualizar_rango(puuid, plataforma, api_key)
+            time.sleep(REQUEST_DELAY_SECONDS)
 
     ya_conocidas = [m for m in ids_recientes if m in ya_procesadas]
     nuevas = [m for m in ids_recientes if m not in ya_procesadas][:max_matches]

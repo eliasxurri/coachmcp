@@ -24,6 +24,7 @@ import estadistica
 AWS_REGION = os.environ.get("AWS_REGION", "sa-east-1")
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "lol-pipeline")
 ATHENA_DATABASE = os.environ.get("ATHENA_DATABASE", "lol_pipeline_db")
+WATERMARK_TABLE = os.environ.get("WATERMARK_TABLE", "lol-pipeline-watermark")
 
 # Nombres legibles para los queue IDs que aparecen en el caso de uso.
 QUEUES = {
@@ -39,6 +40,7 @@ QUEUES = {
 }
 
 athena = boto3.client("athena", region_name=AWS_REGION)
+dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 
 mcp = MCPServer("lol-coach")
 
@@ -176,6 +178,63 @@ def filtro_fecha(days: int, alias: str = "") -> str:
     desde = datetime.now(timezone.utc) - timedelta(days=days)
     columna = f"{alias}.jugada_en" if alias else "jugada_en"
     return f"{columna} >= timestamp {sql_str(desde.strftime('%Y-%m-%d %H:%M:%S'))}"
+
+
+COLAS_RANKED = {
+    "RANKED_SOLO_5x5": "ranked solo/duo",
+    "RANKED_FLEX_SR": "ranked flex",
+}
+
+
+@mcp.tool()
+def get_rank() -> dict:
+    """
+    Rango competitivo actual del jugador: tier, división, LP y récord.
+
+    Lo refresca la Lambda de ingesta en cada corrida y se lee desde
+    DynamoDB, no desde la API de Riot: así esta herramienta sigue
+    respondiendo aunque la API key esté expirada.
+
+    Sirve para interpretar el resto de las herramientas: cuando
+    get_coaching_priorities dice "por debajo de tus pares", esos pares son
+    jugadores de este mismo rango, porque salen de las propias partidas.
+    """
+    puuid = resolver_puuid(None)
+    item = dynamodb.Table(WATERMARK_TABLE).get_item(Key={"puuid": puuid}).get("Item") or {}
+    rango = item.get("rango") or {}
+
+    if not rango:
+        return {
+            "rango": None,
+            "nota": ("Todavía no se registró el rango. Se actualiza en la "
+                     "próxima corrida de la ingesta, o el jugador no tiene "
+                     "partidas de ranked esta temporada."),
+        }
+
+    colas = []
+    for clave, datos in rango.items():
+        victorias = int(datos.get("victorias") or 0)
+        derrotas = int(datos.get("derrotas") or 0)
+        total = victorias + derrotas
+        colas.append({
+            "cola": COLAS_RANKED.get(clave, clave),
+            "tier": datos.get("tier"),
+            "division": datos.get("division"),
+            "lp": int(datos.get("lp") or 0),
+            "victorias": victorias,
+            "derrotas": derrotas,
+            "winrate_pct": round(100.0 * victorias / total, 1) if total else None,
+        })
+
+    # Solo/duo primero: es la cola sobre la que trabaja todo lo demás.
+    colas.sort(key=lambda c: c["cola"] != "ranked solo/duo")
+    return {
+        "colas": colas,
+        "actualizado": item.get("rango_actualizado"),
+        "nota": ("El récord es el de la temporada según Riot; el winrate que "
+                 "calculan las otras herramientas sale de las partidas "
+                 "ingeridas y puede cubrir un período distinto."),
+    }
 
 
 @mcp.tool()

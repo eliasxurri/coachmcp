@@ -66,6 +66,7 @@ resource "aws_lambda_function" "mcp" {
   environment {
     variables = {
       USERS_TABLE      = aws_dynamodb_table.usuarios.name
+      WATERMARK_TABLE  = aws_dynamodb_table.watermark.name
       ATHENA_WORKGROUP = aws_athena_workgroup.lol.name
       ATHENA_DATABASE  = aws_glue_catalog_database.lol.name
 
@@ -243,6 +244,15 @@ data "aws_iam_policy_document" "mcp_permissions" {
       "dynamodb:UpdateItem",
     ]
     resources = [aws_dynamodb_table.usuarios.arn]
+  }
+
+  # Solo lectura: el rango lo escribe la ingesta, que es quien habla con
+  # la API de Riot. Este servidor nunca escribe en el watermark.
+  statement {
+    sid       = "LeerRango"
+    effect    = "Allow"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.watermark.arn]
   }
 }
 

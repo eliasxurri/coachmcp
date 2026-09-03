@@ -282,6 +282,30 @@ simple y solo 3 sobreviven la corrección. Las otras 5 quedan como
 indicio: una caída del 51% en tiempo muerto (p=0,014) es demasiado
 interesante para tirarla, pero afirmarla como hecho sería sobrevender.
 
+### El rango se ingiere, no se consulta al vuelo
+
+**Problema.** "¿Cuál es mi elo?" fue la primera pregunta que un usuario le
+hizo al producto y no se pudo responder: las herramientas daban
+estadísticas de partidas, no el rango competitivo.
+
+**Decisión.** La Lambda de ingesta consulta League-V4 una vez por jugador
+y por corrida, y guarda tier, división, LP y récord junto al watermark. El
+servidor MCP lo lee de DynamoDB, nunca de la API de Riot: así la consulta
+sigue funcionando aunque la key esté expirada, que es la misma razón por
+la que ninguna herramienta habla con Riot.
+
+Dos detalles que costaron: **League-V4 enruta por plataforma**
+(`la2.api.riotgames.com`), no por región (`americas`) como match-v5, pero
+no hizo falta configurarlo porque el prefijo del `match_id` ya lo dice. Y
+`guardar_watermark` pasó de `put_item` a `update_item`, porque el item del
+jugador ahora guarda dos cosas y un put borraría la otra.
+
+**Resultado.** El récord que devuelve Riot (200V/169D, 54,2%) coincide con
+el winrate que calcula el pipeline sobre las partidas ingeridas (54,5%),
+lo que valida de paso toda la cadena. Y le da sentido al baseline de
+pares: cuando dice "por debajo de tus pares", esos pares son jugadores del
+mismo rango.
+
 ### La instrucción viaja con el dato, no solo en el docstring
 
 **Problema.** La clasificación en tres niveles estaba explicada en los
@@ -814,6 +838,7 @@ Herramientas:
   tamaño de efecto
 - `get_laning_benchmarks(player, days, rol, solo_only)` — CS, oro y
   XP contra el rival directo de línea en los minutos 5, 10, 14 y 20
+- `get_rank()` — tier, división, LP y récord de la temporada
 
 Las mismas 7 se sirven por HTTP para conectarlas a Claude.ai sin instalar
 nada: ver [Servidor MCP remoto](#servidor-mcp-remoto-beta).
@@ -969,5 +994,6 @@ admite en los conectores personalizados.
   `timelines_raw` guarda kills con posición y timestamp, compras de
   ítems, wards y placas. Permitiría mapas de dónde se muere, orden de
   build y timing del primer back.
-- **Rango real vía League-V4**, para contrastar el baseline de pares
-  contra el tier declarado en vez de inferirlo del matchmaking.
+- **Contrastar el baseline de pares contra el tier declarado.** Ya se
+  ingiere el rango; falta usarlo para verificar que los pares de cada
+  partida están efectivamente en el mismo rango que el jugador.
