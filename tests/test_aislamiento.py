@@ -117,6 +117,18 @@ class RutasTests(unittest.TestCase):
                     estado, _ = llamar_asgi(ruta)
                 self.assertEqual(estado, 404)
 
+    def test_un_fallo_de_dynamodb_no_se_reporta_como_401(self):
+        """
+        Un 401 le dice a Claude.ai que el servidor pide iniciar sesión, y
+        manda al usuario a reconfigurar la autenticación por un problema que
+        no es suyo. Una caída del almacén tiene que dar 503.
+        """
+        with patch.object(app_mod, "buscar_usuario",
+                          side_effect=app_mod.AlmacenNoDisponible("caida")):
+            estado, cuerpo = llamar_asgi("/u/loquesea/mcp")
+        self.assertEqual(estado, 503)
+        self.assertNotIn("inválido", json.loads(cuerpo)["error"])
+
     def test_el_token_no_se_registra_entero_en_los_logs(self):
         """Un token en texto plano en CloudWatch es una credencial filtrada."""
         token = "t" * 40

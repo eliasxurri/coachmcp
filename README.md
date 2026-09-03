@@ -915,6 +915,13 @@ invocación, así que la primera llamada funciona y la segunda falla. Como
 Mangum reutiliza el mismo loop mientras el contenedor sigue caliente,
 `app.py` arranca el ciclo al importarse y le pasa `lifespan="off"`.
 
+**Un fallo del almacén da 503, no 401.** Si la consulta a DynamoDB falla y
+se responde 401, Claude.ai lo interpreta como que el servidor exige iniciar
+sesión y manda al usuario a reconfigurar la autenticación del conector: un
+callejón sin salida para un problema que no tiene que ver con sus
+credenciales. `buscar_usuario` devuelve `None` solo cuando el token
+realmente no existe.
+
 **`ALLOWED_HOSTS` es obligatorio.** El SDK valida el header `Host` contra
 una lista blanca para frenar DNS rebinding, y por defecto asume localhost:
 detrás de API Gateway, sin declarar el dominio, toda petición real responde

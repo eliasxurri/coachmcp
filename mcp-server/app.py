@@ -39,13 +39,30 @@ RUTA_MCP = "/mcp"
 dynamodb = boto3.resource("dynamodb")
 
 
+class AlmacenNoDisponible(RuntimeError):
+    """
+    La tabla de usuarios no respondió.
+
+    Existe para no confundir "no pude comprobar quién sos" con "no sos
+    nadie": si un fallo de DynamoDB se reporta como 401, Claude.ai lo lee
+    como que el servidor exige iniciar sesión y le pide al usuario que
+    reconfigure la autenticación del conector, que es un callejón sin
+    salida para un problema que no tiene nada que ver.
+    """
+
+
 def buscar_usuario(token: str) -> dict | None:
-    """Cambia un token por el usuario dueño de esos datos."""
+    """
+    Cambia un token por el usuario dueño de esos datos.
+
+    Devuelve None solo cuando el token de verdad no existe. Si la consulta
+    falla, levanta AlmacenNoDisponible.
+    """
     try:
         item = dynamodb.Table(TABLA_USUARIOS).get_item(Key={"token": token}).get("Item")
-    except ClientError:
+    except ClientError as error:
         logger.exception("No se pudo leer la tabla de usuarios")
-        return None
+        raise AlmacenNoDisponible("La tabla de usuarios no respondió") from error
     return item if item and item.get("puuid") else None
 
 
@@ -120,7 +137,16 @@ async def app(scope, receive, send):
         await _rechazar(send, 404, "Ruta desconocida. Usá la URL que te entregaron.")
         return
 
-    usuario = buscar_usuario(token)
+    try:
+        usuario = buscar_usuario(token)
+    except AlmacenNoDisponible:
+        await _rechazar(
+            send, 503,
+            "El servicio no está disponible en este momento. No es un problema "
+            "con tu enlace: volvé a intentar en unos minutos.",
+        )
+        return
+
     if usuario is None:
         # Mismo mensaje para token inexistente y malformado: distinguirlos
         # ayudaría a adivinar tokens válidos.
