@@ -283,6 +283,90 @@ def get_rank() -> dict:
     }
 
 
+# Mismo prefijo que usa la ingesta al guardar los cortes.
+APEX_KEY_PREFIJO = "__apex_"
+
+TIERS_APEX = ("MASTER", "GRANDMASTER", "CHALLENGER")
+
+
+@mcp.tool()
+def get_apex_cutoff() -> dict:
+    """
+    Cuántos LP hace falta para entrar a Grandmaster o Challenger, y a qué
+    distancia está el jugador.
+
+    Es imprescindible para razonar sobre un ascenso desde Master:
+    Grandmaster y Challenger son ligas de **tamaño fijo**, no umbrales de
+    LP. No se entra acumulando puntos hasta un número, se entra desplazando
+    al último de la liga, así que el corte se mueve mientras uno sube.
+
+    Tratar la meta como una escalera fija subestima lo que hace falta.
+    """
+    puuid = resolver_puuid(None)
+    tabla = dynamodb.Table(WATERMARK_TABLE)
+
+    jugador = tabla.get_item(Key={"puuid": puuid}).get("Item") or {}
+    solo = (jugador.get("rango") or {}).get("RANKED_SOLO_5x5") or {}
+    plataforma = jugador.get("plataforma")
+
+    # La plataforma no se guarda aparte: se deduce de cualquier partida.
+    if not plataforma:
+        filas = run_query(f"""
+            SELECT match_id FROM matches_curated
+            WHERE puuid = {sql_str(puuid)} LIMIT 1
+        """)
+        if filas:
+            plataforma = filas[0]["match_id"].partition("_")[0].lower()
+
+    if not plataforma:
+        return {"error": "No se pudo determinar la región del jugador."}
+
+    item = tabla.get_item(
+        Key={"puuid": f"{APEX_KEY_PREFIJO}{plataforma}__"}
+    ).get("Item") or {}
+    ligas = item.get("ligas") or {}
+
+    if not ligas:
+        return {
+            "cortes": None,
+            "nota": ("Todavía no se registraron los cortes. Se actualizan "
+                     "cada 6 horas desde la ingesta."),
+        }
+
+    lp_actual = int(solo.get("lp") or 0)
+    tier = (solo.get("tier") or "").upper()
+    en_apex = tier in TIERS_APEX
+
+    cortes = []
+    for nombre in ("grandmaster", "challenger"):
+        datos = ligas.get(nombre)
+        if not datos:
+            continue
+        corte = int(datos.get("corte_lp") or 0)
+        cortes.append({
+            "liga": nombre,
+            "corte_lp": corte,
+            "plazas": int(datos.get("plazas") or 0),
+            "mediana_lp": int(datos.get("mediana_lp") or 0),
+            # La brecha solo tiene sentido si ya se está en el tramo apex:
+            # desde Diamante hacia abajo hay que ascender de tier primero.
+            "lp_faltantes": max(corte - lp_actual, 0) if en_apex else None,
+        })
+
+    return {
+        "tier_actual": solo.get("tier"),
+        "lp_actual": lp_actual,
+        "region": plataforma,
+        "cortes": cortes,
+        "actualizado": item.get("actualizado"),
+        "nota": ("Grandmaster y Challenger tienen un número fijo de plazas: "
+                 "el corte es el LP del último jugador dentro, no un umbral "
+                 "estable. Sube mientras la gente sube, así que alcanzar la "
+                 "diferencia de hoy no garantiza entrar. Cualquier plan de "
+                 "ascenso debe contar con que la meta se mueve."),
+    }
+
+
 @mcp.tool()
 def list_players() -> list[dict]:
     """Lista los jugadores con partidas en el data lake y cuántas tiene cada uno."""

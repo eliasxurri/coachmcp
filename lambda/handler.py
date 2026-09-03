@@ -216,6 +216,70 @@ def plataforma_de(match_id: str) -> str | None:
     return prefijo.lower() if prefijo and resto else None
 
 
+APEX_KEY_PREFIJO = "__apex_"
+APEX_REFRESCO_SEGUNDOS = 6 * 3600
+
+
+def actualizar_cortes_apex(plataforma: str, api_key: str) -> None:
+    """
+    Guarda el LP mínimo de Grandmaster y Challenger de la región.
+
+    Hace falta porque esas ligas son de tamaño fijo: no se llega a
+    Grandmaster acumulando LP hasta un número, se llega desplazando al
+    jugador número 500. Sin este dato, cualquier plan de ascenso razona
+    sobre una escalera que no existe.
+
+    Se refresca cada 6 horas y no en cada corrida: el corte se mueve lento
+    y cada consulta trae las 500 entradas de la liga completa.
+    """
+    tabla = dynamodb.Table(WATERMARK_TABLE)
+    clave = f"{APEX_KEY_PREFIJO}{plataforma}__"
+    ahora = int(time.time())
+
+    try:
+        actual = tabla.get_item(Key={"puuid": clave}).get("Item") or {}
+        if ahora - int(actual.get("actualizado", 0)) < APEX_REFRESCO_SEGUNDOS:
+            return
+    except ClientError:
+        logger.warning("No se pudo leer el corte apex", exc_info=True)
+        return
+
+    ligas = {}
+    for nombre, ruta in (("grandmaster", "grandmasterleagues"),
+                         ("challenger", "challengerleagues")):
+        try:
+            liga = riot_get(
+                f"/lol/league/v4/{ruta}/by-queue/RANKED_SOLO_5x5",
+                api_key,
+                base=f"https://{plataforma}.api.riotgames.com",
+            )
+        except (RiotAPIError, urllib.error.URLError):
+            logger.warning("No se pudo obtener la liga %s", nombre, exc_info=True)
+            continue
+
+        lps = sorted(e["leaguePoints"] for e in liga.get("entries", []))
+        if lps:
+            ligas[nombre] = {"corte_lp": lps[0], "plazas": len(lps),
+                             "mediana_lp": lps[len(lps) // 2]}
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    if not ligas:
+        return
+
+    try:
+        tabla.update_item(
+            Key={"puuid": clave},
+            UpdateExpression="SET ligas = :l, actualizado = :ahora",
+            ExpressionAttributeValues={":l": ligas, ":ahora": ahora},
+        )
+    except ClientError:
+        logger.warning("No se pudo guardar el corte apex", exc_info=True)
+        return
+
+    gm = ligas.get("grandmaster", {})
+    logger.info("Corte de Grandmaster en %s: %s LP", plataforma, gm.get("corte_lp"))
+
+
 def actualizar_rango(puuid: str, plataforma: str, api_key: str) -> None:
     """
     Guarda el rango actual del jugador junto a su watermark.
@@ -391,6 +455,7 @@ def procesar_jugador(
         if plataforma:
             actualizar_rango(puuid, plataforma, api_key)
             time.sleep(REQUEST_DELAY_SECONDS)
+            actualizar_cortes_apex(plataforma, api_key)
 
     ya_conocidas = [m for m in ids_recientes if m in ya_procesadas]
     nuevas = [m for m in ids_recientes if m not in ya_procesadas][:max_matches]

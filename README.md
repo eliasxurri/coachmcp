@@ -339,6 +339,29 @@ lo que valida de paso toda la cadena. Y le da sentido al baseline de
 pares: cuando dice "por debajo de tus pares", esos pares son jugadores del
 mismo rango.
 
+### Grandmaster no es un umbral de LP
+
+**Problema.** Al pedirle un plan para llegar a Grandmaster, el asistente
+razonó sobre "subir 400 LP en un mes" sin poder verificar la meta: no había
+herramienta que dijera cuál es el corte. Y la premisa está mal en un
+sentido que cambia el plan.
+
+**Decisión.** Grandmaster y Challenger son **ligas de tamaño fijo** —500 y
+200 plazas en LA2—, no umbrales de LP. No se entra acumulando puntos hasta
+un número: se entra desplazando al último de la liga, así que el corte se
+mueve mientras uno sube. `get_apex_cutoff` consulta esos cortes y calcula la
+distancia real, y su nota lo dice explícitamente para que ningún plan trate
+la meta como una escalera fija.
+
+Los cortes los ingiere la Lambda, como el rango, pero **cada 6 horas y no en
+cada corrida**: se mueven lento y cada consulta trae las 500 entradas de la
+liga completa.
+
+**Resultado.** El corte de Grandmaster en LA2 estaba en 726 LP con el
+jugador en 311: 415 de diferencia, no un número redondo inventado. Con su
+winrate y volumen del momento, la aritmética decía que no alcanzaba — algo
+que el plan original intuyó, pero sin poder mostrarlo.
+
 ### La instrucción viaja con el dato, no solo en el docstring
 
 **Problema.** La clasificación en tres niveles estaba explicada en los
@@ -872,6 +895,8 @@ Herramientas:
 - `get_laning_benchmarks(player, days, rol, solo_only)` — CS, oro y
   XP contra el rival directo de línea en los minutos 5, 10, 14 y 20
 - `get_rank()` — tier, división, LP y récord de la temporada
+- `get_apex_cutoff()` — LP que hace falta para Grandmaster y Challenger,
+  y a qué distancia está el jugador
 
 Las mismas 7 se sirven por HTTP para conectarlas a Claude.ai sin instalar
 nada: ver [Servidor MCP remoto](#servidor-mcp-remoto-beta).

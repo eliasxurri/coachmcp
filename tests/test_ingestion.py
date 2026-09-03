@@ -246,5 +246,37 @@ class RangoTests(unittest.TestCase):
         self.assertIn("la2.api.riotgames.com", handler.riot_get.call_args.kwargs["base"])
 
 
+class CortesApexTests(unittest.TestCase):
+    def test_no_reconsulta_si_el_dato_es_reciente(self):
+        """Cada consulta trae 500 entradas: no se pide en cada corrida."""
+        handler = load_handler()
+        import time as _t
+        handler.dynamodb.Table.return_value.get_item.return_value = {
+            "Item": {"actualizado": int(_t.time()) - 60}
+        }
+        handler.riot_get = MagicMock()
+        handler.actualizar_cortes_apex("la2", "key")
+        handler.riot_get.assert_not_called()
+
+    def test_guarda_el_corte_y_las_plazas(self):
+        handler = load_handler()
+        handler.dynamodb.Table.return_value.get_item.return_value = {}
+        handler.riot_get = MagicMock(return_value={"entries": [
+            {"leaguePoints": 900}, {"leaguePoints": 726}, {"leaguePoints": 1300},
+        ]})
+        handler.actualizar_cortes_apex("la2", "key")
+        kwargs = handler.dynamodb.Table.return_value.update_item.call_args.kwargs
+        gm = kwargs["ExpressionAttributeValues"][":l"]["grandmaster"]
+        self.assertEqual(gm["corte_lp"], 726)   # el mínimo, no el primero
+        self.assertEqual(gm["plazas"], 3)
+
+    def test_un_fallo_no_tumba_la_ingesta(self):
+        handler = load_handler()
+        handler.dynamodb.Table.return_value.get_item.return_value = {}
+        handler.riot_get = MagicMock(side_effect=handler.RiotAPIError("503"))
+        handler.actualizar_cortes_apex("la2", "key")  # no debe levantar
+        handler.dynamodb.Table.return_value.update_item.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
