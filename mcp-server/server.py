@@ -10,6 +10,7 @@ filtran por la partición puuid (y por fecha cuando aplica) para que
 cada consulta escanee KBs, no el bucket completo.
 """
 
+import contextvars
 import os
 import re
 import time
@@ -95,13 +96,33 @@ def sql_str(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+# PUUID del usuario autenticado cuando el servidor corre en remoto.
+#
+# Lo fija el middleware de app.py a partir del token de la URL. Es un
+# contextvar y no una global porque en ASGI conviven varias peticiones en el
+# mismo proceso: una global las mezclaría entre usuarios.
+puuid_de_sesion: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "puuid_de_sesion", default=None
+)
+
+
 def resolver_puuid(player: str | None) -> str:
     """
-    Convierte un Riot ID ("nombre#tag"), un prefijo de nombre o None en
-    un PUUID, usando los datos ya ingeridos (no la API de Riot).
+    Devuelve el PUUID sobre el que operan las herramientas.
 
-    Con None: si hay un solo jugador en el lake, se usa ese.
+    En remoto el token de la URL ya determina de quién son los datos, así
+    que ese PUUID gana **siempre** y el argumento `player` se ignora. No es
+    una validación que se pueda olvidar: mientras haya sesión, no existe
+    camino por el que un usuario alcance las partidas de otro, ni pasando
+    un Riot ID ajeno ni un PUUID crudo.
+
+    En local (stdio, un solo jugador) no hay sesión y `player` funciona como
+    siempre: Riot ID, nombre a secas, o None si solo hay uno rastreado.
     """
+    de_sesion = puuid_de_sesion.get()
+    if de_sesion is not None:
+        return de_sesion
+
     jugadores = listar_jugadores()
     if not jugadores:
         raise ValueError("El data lake está vacío: aún no se ingirió ninguna partida.")
@@ -160,6 +181,12 @@ def filtro_fecha(days: int, alias: str = "") -> str:
 @mcp.tool()
 def list_players() -> list[dict]:
     """Lista los jugadores con partidas en el data lake y cuántas tiene cada uno."""
+    # En remoto el data lake es compartido entre los usuarios del beta, así
+    # que devolver la lista completa filtraría los Riot ID de todos. Con
+    # sesión, cada quien se ve solo a sí mismo.
+    de_sesion = puuid_de_sesion.get()
+    if de_sesion is not None:
+        return [j for j in listar_jugadores() if j["puuid"] == de_sesion]
     return listar_jugadores()
 
 

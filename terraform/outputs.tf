@@ -39,3 +39,12 @@ output "siguiente_paso" {
         respuesta.json && cat respuesta.json
   EOT
 }
+
+output "mcp_url_base" {
+  description = <<-EOT
+    Base del conector remoto. La URL de cada usuario del beta es
+    <base>/u/<token>/mcp, y es lo que se pega en Claude.ai
+    (Customize -> Connectors). Verificación: <base>/salud.
+  EOT
+  value       = aws_apigatewayv2_stage.mcp.invoke_url
+}

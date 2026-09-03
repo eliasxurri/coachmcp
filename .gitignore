@@ -31,3 +31,9 @@ respuesta.json
 
 # Local
 .DS_Store
+
+# Contexto estratégico personal, no versionar
+company-context.md
+
+# Paquete de despliegue del servidor MCP remoto (lo arma construir.sh)
+mcp-server/build/

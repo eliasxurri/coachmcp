@@ -789,6 +789,9 @@ Herramientas:
 - `get_laning_benchmarks(player, days, rol, solo_only)` — CS, oro y
   XP contra el rival directo de línea en los minutos 5, 10, 14 y 20
 
+Las mismas 7 se sirven por HTTP para conectarlas a Claude.ai sin instalar
+nada: ver [Servidor MCP remoto](#servidor-mcp-remoto-beta).
+
 Las dos últimas devuelven el p-valor junto a cada delta, más una
 `clasificacion` de tres niveles (`significativo` / `indicio` / `ruido`)
 ya corregida por comparaciones múltiples. Solo lo marcado como
@@ -820,6 +823,112 @@ probarlo a mano:
 ```bash
 .venv/bin/python server.py
 ```
+
+## Servidor MCP remoto (beta)
+
+El servidor por stdio exige venv, credenciales de AWS y editar `.mcp.json`:
+sirve para desarrollar, no para que lo use un jugador. Claude.ai acepta
+**conectores remotos en todos sus planes** —Free incluido, limitado a uno—
+pegando una URL en *Customize → Connectors*, así que la misma lógica se
+expone por HTTP para poder ponerla frente a gente real.
+
+Las 7 herramientas no cambian. Cambia el transporte y se agrega identidad.
+
+### Aislamiento entre usuarios
+
+El data lake es compartido, así que el token de la URL **fija** el jugador:
+con sesión activa, `resolver_puuid` devuelve siempre ese PUUID e ignora el
+argumento `player`. No es una validación que se pueda olvidar — no existe
+camino por el que un usuario alcance datos de otro, ni pidiéndolos por Riot
+ID ni por PUUID crudo. `list_players` también se acota a quien pregunta.
+`tests/test_aislamiento.py` fija ese comportamiento.
+
+### Desplegar
+
+El paquete de la Lambda se arma aparte, porque `archive_file` solo comprime
+un directorio y hay que instalar dependencias:
+
+```bash
+cd mcp-server && ./construir.sh    # deja build/ listo (~9 MB comprimido)
+cd ../terraform && terraform apply
+```
+
+`construir.sh` descarta boto3 y botocore: el runtime de Lambda ya los trae y
+son 28 de los 43 MB que ocuparía el paquete. Los `*.dist-info` **no** se
+tocan; varias dependencias resuelven su versión con `importlib.metadata` al
+importarse y sin ellos la función no arranca.
+
+### Dar de alta a alguien
+
+Manual a propósito: el objetivo es validar, no escalar.
+
+```bash
+# 1. Rastrear al jugador
+#    (agregar su Riot ID a tracked_summoners en terraform.tfvars y aplicar)
+
+# 2. Traer su historial: una o dos páginas alcanzan.
+#    El historial completo son ~35 minutos de API por persona.
+aws lambda invoke --function-name lol-pipeline-ingesta \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"mode":"backfill","player":"Nombre#TAG","start":0,"count":80}' /tmp/b.json
+
+# 3. Curar
+aws lambda invoke --function-name lol-pipeline-curado \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"lookback_days":400}' /tmp/c.json
+
+# 4. Emitir el token y entregarle la URL
+TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+aws dynamodb put-item --table-name lol-pipeline-usuarios --item "{
+  \"token\":{\"S\":\"$TOKEN\"},
+  \"puuid\":{\"S\":\"<su PUUID>\"},
+  \"riot_id\":{\"S\":\"Nombre#TAG\"},
+  \"alta\":{\"N\":\"$(date +%s)\"}}"
+
+echo "$(terraform -chdir=terraform output -raw mcp_url_base)u/$TOKEN/mcp"
+```
+
+**Ojo con el rate limit:** cada jugador cuesta 2+N requests por corrida.
+Pasando de ~10 usuarios conviene bajar `matches_per_run` de 10 a 5, porque
+el tope de Riot son 100 requests cada 2 minutos y la ingesta comparte la key
+con la descarga de timelines.
+
+### Qué medir
+
+Cada llamada incrementa `llamadas` y actualiza `ultimo_uso` en la tabla de
+usuarios. La métrica que decide si el producto vale es una sola: **cuántos
+volvieron una segunda semana sin que se lo pidieran**.
+
+### Decisiones que costaron un rato
+
+**API Gateway en vez de Lambda Function URL.** La Function URL es más simple
+y gratis, pero esta cuenta bloquea las URLs públicas de Lambda a nivel de
+cuenta: devuelve 403 antes de invocar la función. Se comprobó creando una
+Lambda vacía con su propia URL pública —también 403, con la policy correcta
+y sin pertenecer a ninguna organización—. API Gateway no está sujeto a ese
+control y cuesta ~$1 por millón de peticiones.
+
+**El ciclo de vida ASGI se arranca una sola vez.** El gestor de
+`streamable_http` crea un task group durante el arranque del ciclo de vida,
+atado al event loop que lo creó. Mangum entra y sale del ciclo en cada
+invocación, así que la primera llamada funciona y la segunda falla. Como
+Mangum reutiliza el mismo loop mientras el contenedor sigue caliente,
+`app.py` arranca el ciclo al importarse y le pasa `lifespan="off"`.
+
+**`ALLOWED_HOSTS` es obligatorio.** El SDK valida el header `Host` contra
+una lista blanca para frenar DNS rebinding, y por defecto asume localhost:
+detrás de API Gateway, sin declarar el dominio, toda petición real responde
+421. Terraform lo inyecta con el dominio del stage.
+
+### Riesgo aceptado
+
+**La URL es la credencial.** Quien tenga el enlace ve las estadísticas de
+ese jugador. Es tolerable en un beta cerrado porque los datos de LoL ya son
+públicos —op.gg los muestra sin autenticación—, pero **no es aceptable para
+producción**: si el beta da señal, el paso siguiente es OAuth, que Claude.ai
+admite en los conectores personalizados.
+
+---
 
 ## Próximos pasos
 
