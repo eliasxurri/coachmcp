@@ -75,8 +75,14 @@ Cómo reportar los números:
   claro que es interpretación tuya y no algo que digan las herramientas.
 
 Contexto para leer los resultados:
-- Por defecto solo cuenta ranked solo/duo; flex y ARAM quedan fuera porque
-  distorsionan las métricas.
+- Solo cuenta ranked solo/duo. `solo_only` viene en True y NO hay que
+  cambiarlo salvo que el usuario pida flex o ARAM por su nombre. Es
+  preferible devolver menos partidas que completar un número mezclando
+  modos: flex es menos serio y ARAM no comparte las reglas del juego, así
+  que sus valores de CS, oro y daño no son comparables.
+- Nunca mezcles modos dentro de una misma conclusión. Si por pedido
+  explícito hay varios, separá los resultados por modo en vez de sacar un
+  patrón del conjunto.
 - Los "pares" son los otros jugadores de las propias partidas, que el
   matchmaking empareja al mismo nivel: son del mismo rango que el usuario.
 - get_rank da el rango, la división y los LP actuales.

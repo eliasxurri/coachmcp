@@ -307,6 +307,14 @@ conversación ya abierta: la lista queda cacheada. Hay que abrir un chat
 nuevo o pedirle explícitamente que revise las herramientas. Reconectar el
 conector no alcanza.
 
+**Los defaults se declaran como reglas, no como preferencias.** La primera
+versión decía "por defecto solo cuenta ranked solo/duo", y el asistente lo
+leyó como lo que era —un default cambiable—: al pedirle diez partidas y
+haber solo nueve de soloq, puso `solo_only=False` para completar el número
+y sacó un patrón que incluía una partida de flex. Ahora la instrucción dice
+que no se cambia salvo pedido explícito, y que no se mezclan modos dentro
+de una misma conclusión.
+
 ### El rango se ingiere, no se consulta al vuelo
 
 **Problema.** "¿Cuál es mi elo?" fue la primera pregunta que un usuario le
@@ -974,6 +982,27 @@ con la descarga de timelines.
 Cada llamada incrementa `llamadas` y actualiza `ultimo_uso` en la tabla de
 usuarios. La métrica que decide si el producto vale es una sola: **cuántos
 volvieron una segunda semana sin que se lo pidieran**.
+
+Además queda en CloudWatch qué se pidió, no solo que alguien pidió algo:
+
+```json
+{"evento": "peticion_mcp", "token": "PdSQBGEl", "riot_id": "elias#000",
+ "metodo": "tools/call", "herramienta": "get_champion_stats",
+ "argumentos": {"days": 30, "min_games": 5}}
+```
+
+El cuerpo se lee en el middleware y se repone antes de delegar, porque en
+ASGI los mensajes del cuerpo se entregan una sola vez y leerlo para el log
+se lo robaría al servidor MCP. Solo se registran parámetros de consulta
+—ventanas, roles, umbrales—, nunca datos personales, y del token apenas un
+prefijo.
+
+Dos cosas hicieron falta para que esto funcionara. La primera es que
+`logging.basicConfig` es un **no-op en Lambda**: el runtime ya configuró el
+logger raíz, así que el nivel se queda en WARNING y los INFO se descartan en
+silencio. La función parecía muda y en realidad estaba registrando a un
+nivel que nadie escuchaba. La segunda es que saber la herramienta exige
+abrir el cuerpo JSON-RPC: el método viaja ahí, no en la ruta.
 
 ### Decisiones que costaron un rato
 

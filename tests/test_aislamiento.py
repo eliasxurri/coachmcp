@@ -80,13 +80,13 @@ class AislamientoTests(unittest.TestCase):
             self.assertEqual(server.resolver_puuid("beto#LAS"), PUUID_B)
 
 
-def llamar_asgi(ruta: str, metodo: str = "POST") -> tuple[int, bytes]:
+def llamar_asgi(ruta: str, metodo: str = "POST", envio: bytes = b"") -> tuple[int, bytes]:
     """Ejecuta una petición contra la app ASGI sin levantar un servidor."""
     respuesta = {}
     cuerpo = bytearray()
 
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.request", "body": envio, "more_body": False}
 
     async def send(mensaje):
         if mensaje["type"] == "http.response.start":
@@ -143,6 +143,54 @@ class RutasTests(unittest.TestCase):
             with self.assertLogs("lol-coach-http", level="INFO") as registro:
                 llamar_asgi(f"/u/{token}/mcp")
         self.assertNotIn(token, "\n".join(registro.output))
+
+
+class RegistroDeUsoTests(unittest.TestCase):
+    """
+    Saber QUÉ herramienta se pidió es la mitad de la métrica del beta. Sin
+    esto solo consta que alguien llamó, no qué necesitaba.
+    """
+
+    def _llamar_con_cuerpo(self, cuerpo: bytes):
+        recibido = {}
+
+        async def mcp_falso(scope, receive, send):
+            mensaje = await receive()
+            recibido["cuerpo"] = mensaje.get("body", b"")
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        with patch.object(app_mod, "buscar_usuario",
+                          return_value={"puuid": PUUID_A, "riot_id": "ana#LAS"}), \
+             patch.object(app_mod, "registrar_uso"), \
+             patch.object(app_mod, "aplicacion_mcp", new=mcp_falso):
+            with self.assertLogs("lol-coach-http", level="INFO") as registro:
+                estado, _ = llamar_asgi("/u/tok/mcp", envio=cuerpo)
+        return estado, recibido.get("cuerpo"), "\n".join(registro.output)
+
+    def test_registra_la_herramienta_y_sus_argumentos(self):
+        peticion = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "get_recent_matches",
+                       "arguments": {"days": 10, "solo_only": False}},
+        }).encode()
+        estado, _, log = self._llamar_con_cuerpo(peticion)
+        self.assertEqual(estado, 200)
+        self.assertIn("get_recent_matches", log)
+        self.assertIn("solo_only", log)
+
+    def test_el_cuerpo_llega_intacto_al_servidor_mcp(self):
+        """Leerlo para el log no puede robárselo a quien lo necesita."""
+        peticion = json.dumps({"jsonrpc": "2.0", "id": 9, "method": "tools/list"}).encode()
+        estado, recibido, log = self._llamar_con_cuerpo(peticion)
+        self.assertEqual(estado, 200)
+        self.assertEqual(recibido, peticion)
+        self.assertIn("tools/list", log)
+
+    def test_un_cuerpo_ilegible_no_rompe_la_peticion(self):
+        estado, recibido, _ = self._llamar_con_cuerpo(b"no es json")
+        self.assertEqual(estado, 200)
+        self.assertEqual(recibido, b"no es json")
 
 
 if __name__ == "__main__":

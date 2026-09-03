@@ -30,8 +30,13 @@ from starlette.responses import JSONResponse
 import server
 from server import mcp
 
-logging.basicConfig(level=logging.INFO)
+# En Lambda el runtime ya configuró el logger raíz, así que basicConfig es
+# un no-op y deja el nivel en WARNING: los INFO se descartan en silencio y
+# la función parece muda. Hay que subir el nivel del raíz explícitamente,
+# como hacen las otras Lambdas del proyecto.
+logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger("lol-coach-http")
+logger.setLevel(logging.INFO)
 
 TABLA_USUARIOS = os.environ.get("USERS_TABLE", "lol-pipeline-usuarios")
 RUTA_MCP = "/mcp"
@@ -154,13 +159,18 @@ async def app(scope, receive, send):
         return
 
     registrar_uso(token)
-    logger.info(
-        json.dumps({
-            "evento": "peticion_mcp",
-            "token": token[:8],
-            "riot_id": usuario.get("riot_id"),
-        })
-    )
+
+    # El cuerpo se lee acá para poder registrar QUÉ se pidió, no solo que
+    # alguien pidió algo: en un beta cuya métrica es el uso, saber qué
+    # herramientas se usan es la mitad del dato. En ASGI el cuerpo se
+    # consume una sola vez, así que se guarda y se repone antes de delegar.
+    cuerpo, receive = await leer_y_reponer(receive)
+    logger.info(json.dumps({
+        "evento": "peticion_mcp",
+        "token": token[:8],
+        "riot_id": usuario.get("riot_id"),
+        **describir_peticion(cuerpo),
+    }))
 
     scope = dict(scope, path=RUTA_MCP, raw_path=RUTA_MCP.encode())
     testigo = server.puuid_de_sesion.set(usuario["puuid"])
@@ -168,6 +178,60 @@ async def app(scope, receive, send):
         await aplicacion_mcp(scope, receive, send)
     finally:
         server.puuid_de_sesion.reset(testigo)
+
+
+async def leer_y_reponer(receive):
+    """
+    Consume el cuerpo de la petición y devuelve un `receive` que lo repone.
+
+    Sin esto, leer el cuerpo para registrarlo se lo robaría al servidor MCP:
+    en ASGI los mensajes del cuerpo se entregan una sola vez.
+    """
+    partes: list[bytes] = []
+    while True:
+        mensaje = await receive()
+        if mensaje["type"] != "http.request":
+            break
+        partes.append(mensaje.get("body", b""))
+        if not mensaje.get("more_body"):
+            break
+
+    cuerpo = b"".join(partes)
+    entregado = False
+
+    async def repuesto():
+        nonlocal entregado
+        if not entregado:
+            entregado = True
+            return {"type": "http.request", "body": cuerpo, "more_body": False}
+        return await receive()
+
+    return cuerpo, repuesto
+
+
+def describir_peticion(cuerpo: bytes) -> dict:
+    """
+    Saca del JSON-RPC qué se pidió, para el log.
+
+    Solo el método, el nombre de la herramienta y sus argumentos: son
+    parámetros de consulta (ventanas, roles, umbrales), no datos personales.
+    """
+    try:
+        mensaje = json.loads(cuerpo or b"{}")
+    except (ValueError, TypeError):
+        return {"metodo": "?"}
+
+    if not isinstance(mensaje, dict):
+        return {"metodo": "?"}
+
+    detalle = {"metodo": mensaje.get("method")}
+    params = mensaje.get("params")
+    if mensaje.get("method") == "tools/call" and isinstance(params, dict):
+        detalle["herramienta"] = params.get("name")
+        argumentos = params.get("arguments")
+        if isinstance(argumentos, dict):
+            detalle["argumentos"] = argumentos
+    return detalle
 
 
 async def _rechazar(send, codigo: int, mensaje: str) -> None:
