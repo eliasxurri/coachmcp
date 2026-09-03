@@ -91,3 +91,25 @@ class ComoReportarTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstruccionesDelServidorTests(unittest.TestCase):
+    """
+    El handshake entrega estas instrucciones antes de cualquier llamada.
+    Son el único lugar donde cabe decir qué NO puede hacer el servidor, que
+    es lo que evita que el modelo invente explicaciones ante un hueco.
+    """
+
+    def test_el_servidor_declara_sus_limites_y_la_disciplina_de_reporte(self):
+        texto = server.INSTRUCCIONES
+        self.assertTrue(server.mcp.instructions)
+        for esperado in ("No consulta la API de Riot en vivo",
+                         "como_reportar",
+                         "indicio",
+                         "ranked solo/duo"):
+            self.assertIn(esperado, texto, f"falta: {esperado}")
+
+    def test_prohibe_explicar_huecos_inventando_como_funciona_la_api(self):
+        """El error concreto: afirmar que el rango 'no viene en la API'."""
+        self.assertIn("No expliques por qué falta suponiendo cómo funciona",
+                      server.INSTRUCCIONES)

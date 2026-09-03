@@ -282,6 +282,31 @@ simple y solo 3 sobreviven la corrección. Las otras 5 quedan como
 indicio: una caída del 51% en tiempo muerto (p=0,014) es demasiado
 interesante para tirarla, pero afirmarla como hecho sería sobrevender.
 
+### El servidor declara qué NO puede hacer
+
+**Problema.** Cuando le faltó la herramienta de rango, el asistente no dijo
+"no la tengo": inventó una justificación técnica —que el dato "no viene en
+el timeline ni en el resumen de partida que expone la API"— que es falsa y
+suena autorizada. Ante un hueco, rellena con una explicación plausible.
+
+**Decisión.** El campo `instructions` del handshake MCP estaba vacío. Ahora
+declara qué es el servidor, **qué no puede hacer** y qué disciplina seguir
+al reportar. Se entrega al modelo antes de cualquier llamada, que es donde
+hace falta: las descripciones de cada herramienta se leen cuando ya se
+eligió cuál usar.
+
+Incluye una instrucción explícita de no explicar los huecos suponiendo cómo
+funciona la API de Riot, porque es exactamente el error que se cometió.
+
+No garantiza nada —el modelo puede ignorarla—, pero es la única capa que
+cubre lo que las herramientas individuales no pueden: lo que el servidor no
+hace no tiene descripción donde vivir.
+
+**Nota operativa.** Agregar una herramienta no la hace visible en una
+conversación ya abierta: la lista queda cacheada. Hay que abrir un chat
+nuevo o pedirle explícitamente que revise las herramientas. Reconectar el
+conector no alcanza.
+
 ### El rango se ingiere, no se consulta al vuelo
 
 **Problema.** "¿Cuál es mi elo?" fue la primera pregunta que un usuario le
