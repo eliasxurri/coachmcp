@@ -52,6 +52,16 @@ limitation to explain a missing tool.
 `tests/` (47 tests), `queries.sql` (15 documented Athena queries),
 [`ANALISIS.md`](ANALISIS.md) (findings with their limitations).
 
+### El conector en uso
+
+![Conversación en Claude.ai: ante la pregunta de dónde se rompen sus derrotas, el asistente descarta la fase temprana y las peleas porque esas métricas son estadísticamente indistinguibles entre victorias y derrotas, y señala la conversión de objetivos, listando los cinco efectos más grandes con su d de Cohen.](docs/conector-en-claude.png)
+
+*Se conecta pegando una URL en Claude.ai, sin instalar nada. El
+razonamiento es por eliminación: lo que **no** difiere entre victorias y
+derrotas descarta esas fases como causa, y es la mitad informativa de la
+respuesta. Las cinco diferencias reales van ordenadas por tamaño de
+efecto, no por p-valor.*
+
 ---
 
 Pipeline serverless que ingiere partidas desde la API de Riot Games hacia
