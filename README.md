@@ -339,6 +339,40 @@ lo que valida de paso toda la cadena. Y le da sentido al baseline de
 pares: cuando dice "por debajo de tus pares", esos pares son jugadores del
 mismo rango.
 
+### Lo que NO difiere es la mitad de la respuesta
+
+**Problema.** Al preguntarle dónde se rompen sus derrotas, el asistente no
+pudo responder: ninguna herramienta separaba victorias de derrotas, y todas
+las métricas venían promediadas sobre las dos. Tuvo que contestar con
+inferencia.
+
+Peor: dijo que no tenía cómo medir los objetivos. Era cierto de sus
+herramientas y falso del pipeline — `dragones_takedowns`,
+`barones_takedowns`, `primera_torre`, `dano_a_objetivos` y cuatro más
+estaban en la capa curada **sin que ninguna herramienta las expusiera**.
+Ingerir un dato y no exponerlo lo deja invisible.
+
+**Decisión.** `get_win_loss_split` compara cada métrica entre victorias y
+derrotas con la misma disciplina que el resto, y expone los objetivos.
+
+**El diseño que importa** es cómo se presenta el resultado. En una derrota
+casi todo sale peor, porque perder y tener malos números son parte del
+mismo hecho: la sola diferencia no explica nada. Por eso la salida separa
+`se_derrumban` —ordenado por tamaño de efecto— de `iguales_en_ambas`, y
+esta última suele ser la mitad informativa: si el CS a los 10 minutos es
+idéntico en victorias y derrotas, la fase temprana queda descartada como
+causa.
+
+Y una advertencia que viaja con cada fila grande: **no prueba causalidad**.
+Tomar menos dragones puede causar la derrota o ser consecuencia de ir
+perdiendo, y los datos no distinguen esas dos cosas.
+
+**Resultado.** Sobre 171 victorias y 124 derrotas en jungla, lo que se
+derrumba son torres (d=1,62), dragones (d=1,26) y daño a objetivos
+(d=1,25). Y lo que resulta **idéntico** incluye la participación en kills
+—la métrica que hasta entonces se venía señalando como la debilidad
+principal—, el CS de jungla a los 10 minutos y todo el control de visión.
+
 ### Medir el LP por partida en vez de estimarlo
 
 **Problema.** Al armar un plan de ascenso, la única variable que decidía
@@ -931,6 +965,8 @@ Herramientas:
   y a qué distancia está el jugador
 - `get_lp_progress(days)` — cuánto LP gana por victoria y pierde por
   derrota, medido del propio histórico
+- `get_win_loss_split(player, days, rol, solo_only)` — qué se derrumba en
+  las derrotas y qué es igual en ambas, incluidos los objetivos
 
 Las mismas 7 se sirven por HTTP para conectarlas a Claude.ai sin instalar
 nada: ver [Servidor MCP remoto](#servidor-mcp-remoto-beta).

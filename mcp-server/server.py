@@ -290,6 +290,215 @@ APEX_KEY_PREFIJO = "__apex_"
 TIERS_APEX = ("MASTER", "GRANDMASTER", "CHALLENGER")
 
 
+# Métricas que se comparan entre victorias y derrotas.
+# (columna, sentido, tipo, expresión)
+#
+# Incluye los objetivos, que hasta ahora estaban en la capa curada sin que
+# ninguna herramienta los expusiera: sin ellos no se puede distinguir "pierdo
+# por la fase temprana" de "pierdo los objetivos grandes".
+METRICAS_RESULTADO = [
+    # Fase temprana
+    ("cs_primeros_10", "mayor", "media", None),
+    ("jungla_cs_antes_10", "mayor", "media", None),
+    ("ventaja_cs_rival", "mayor", "media", None),
+    ("primera_sangre", "mayor", "proporcion", None),
+    # Objetivos
+    ("dragones_takedowns", "mayor", "media", None),
+    ("barones_takedowns", "mayor", "media", None),
+    ("heraldos_takedowns", "mayor", "media", None),
+    ("torres_takedowns", "mayor", "media", None),
+    ("placas_torre", "mayor", "media", None),
+    ("primera_torre", "mayor", "proporcion", None),
+    ("dano_a_objetivos", "mayor", "media", None),
+    # Peleas
+    ("participacion_kills", "mayor", "media", None),
+    ("kda", "mayor", "media", None),
+    ("deaths", "menor", "media", None),
+    ("solo_kills", "mayor", "media", None),
+    ("pct_dano_equipo", "mayor", "media", None),
+    # Economía y tempo
+    ("oro_por_min", "mayor", "media", None),
+    ("dano_por_min", "mayor", "media", None),
+    ("cs_por_min", "mayor", "media", "CAST(cs AS DOUBLE) / nullif(duracion_min, 0)"),
+    ("tiempo_muerto_seg", "menor", "media", None),
+    ("vision_por_min", "mayor", "media", None),
+    ("wards_control", "mayor", "media", None),
+    ("duracion_min", "neutro", "media", None),
+]
+
+
+@mcp.tool()
+def get_win_loss_split(
+    player: str | None = None,
+    days: int = 90,
+    rol: str | None = None,
+    solo_only: bool = True,
+) -> dict:
+    """
+    Compara las métricas del jugador en sus victorias contra sus derrotas,
+    para ubicar en qué fase se rompen las partidas perdidas.
+
+    **Cómo leer esto, que no es obvio:** en una derrota casi todo sale peor
+    que en una victoria, porque perder y tener malos números son parte del
+    mismo hecho. Que una métrica difiera no explica nada por sí solo.
+
+    Lo informativo es el orden por tamaño de efecto —qué se derrumba más— y
+    sobre todo **las métricas que NO difieren**, porque descartan causas: si
+    el CS a los 10 minutos es igual en victorias y derrotas, la fase
+    temprana no es donde se pierden.
+
+    Nada de esto prueba causalidad. Una diferencia grande en dragones puede
+    significar que perder los dragones causa la derrota, o que ir perdiendo
+    impide disputarlos. Los datos no distinguen esas dos cosas: decilo si
+    proponés una lectura.
+
+    Args:
+        player: se ignora en remoto; la sesión ya determina el jugador.
+        days: ventana hacia atrás en días.
+        rol: TOP, JUNGLE, MIDDLE, BOTTOM o UTILITY. Si se omite, usa el rol
+            más jugado, porque mezclar roles compara cosas distintas.
+        solo_only: por defecto True, solo ranked solo/duo.
+    """
+    puuid = resolver_puuid(player)
+    filtro_cola = "AND queue_id = 420" if solo_only else ""
+    filtro = filtro_fecha(days)
+
+    if rol is None:
+        principales = run_query(f"""
+            SELECT rol, count(*) AS partidas
+            FROM matches_curated
+            WHERE puuid = {sql_str(puuid)} AND {filtro} AND rol <> '' {filtro_cola}
+            GROUP BY rol ORDER BY partidas DESC LIMIT 1
+        """)
+        if not principales:
+            return {"error": "Sin partidas con rol asignado en la ventana pedida.",
+                    "ventana_dias": days}
+        rol = principales[0]["rol"]
+
+    columnas = []
+    for nombre, _, tipo, expresion in METRICAS_RESULTADO:
+        fuente = expresion or nombre
+        if tipo == "proporcion":
+            columnas.append(
+                f"sum(CASE WHEN {fuente} THEN 1 ELSE 0 END) AS {nombre}_si, "
+                f"count({fuente}) AS {nombre}_n"
+            )
+        else:
+            columnas.append(
+                f"avg(CAST({fuente} AS DOUBLE)) AS {nombre}_avg, "
+                f"stddev_samp(CAST({fuente} AS DOUBLE)) AS {nombre}_sd, "
+                f"count({fuente}) AS {nombre}_n"
+            )
+
+    filas = run_query(f"""
+        SELECT
+            CASE WHEN victoria THEN 'victoria' ELSE 'derrota' END AS resultado,
+            count(*) AS n,
+            {", ".join(columnas)}
+        FROM matches_curated
+        WHERE puuid = {sql_str(puuid)}
+          AND rol = {sql_str(rol)}
+          AND {filtro}
+          {filtro_cola}
+        GROUP BY 1
+    """)
+
+    grupos = {f["resultado"]: f for f in filas}
+    ganadas, perdidas = grupos.get("victoria", {}), grupos.get("derrota", {})
+    n_v = int(ganadas.get("n") or 0)
+    n_d = int(perdidas.get("n") or 0)
+
+    if n_v < 5 or n_d < 5:
+        return {
+            "error": f"Muestra insuficiente en {rol}: {n_v} victorias y {n_d} derrotas.",
+            "rol": rol, "ventana_dias": days,
+        }
+
+    comparaciones = []
+    for nombre, sentido, tipo, _ in METRICAS_RESULTADO:
+        if tipo == "proporcion":
+            si_v, tot_v = int(ganadas.get(f"{nombre}_si") or 0), int(ganadas.get(f"{nombre}_n") or 0)
+            si_d, tot_d = int(perdidas.get(f"{nombre}_si") or 0), int(perdidas.get(f"{nombre}_n") or 0)
+            if not tot_v or not tot_d:
+                continue
+            media_v, media_d = si_v / tot_v, si_d / tot_d
+            p = estadistica.comparar_proporciones(si_v, tot_v, si_d, tot_d)
+            # Para una proporción, la desviación se deriva de ella misma.
+            sd_v = (media_v * (1 - media_v)) ** 0.5
+            sd_d = (media_d * (1 - media_d)) ** 0.5
+            d = estadistica.tamano_efecto(media_v, sd_v, tot_v, media_d, sd_d, tot_d)
+            n_metrica_v, n_metrica_d = tot_v, tot_d
+        else:
+            crudo_v, crudo_d = ganadas.get(f"{nombre}_avg"), perdidas.get(f"{nombre}_avg")
+            if crudo_v is None or crudo_d is None:
+                continue
+            media_v, media_d = float(crudo_v), float(crudo_d)
+            sd_v = float(ganadas[f"{nombre}_sd"]) if ganadas.get(f"{nombre}_sd") else None
+            sd_d = float(perdidas[f"{nombre}_sd"]) if perdidas.get(f"{nombre}_sd") else None
+            n_metrica_v = int(ganadas.get(f"{nombre}_n") or 0)
+            n_metrica_d = int(perdidas.get(f"{nombre}_n") or 0)
+            p = estadistica.comparar_medias(media_v, sd_v, n_metrica_v, media_d, sd_d, n_metrica_d)
+            d = estadistica.tamano_efecto(media_v, sd_v, n_metrica_v, media_d, sd_d, n_metrica_d)
+
+        comparaciones.append({
+            "metrica": nombre,
+            "en_victorias": round(media_v, 3),
+            "en_derrotas": round(media_d, 3),
+            "delta_pct": round(100.0 * (media_v - media_d) / media_d, 1) if media_d else None,
+            "d_cohen": _redondear(d, 2),
+            "magnitud": estadistica.magnitud(d),
+            "p_valor": _redondear(p, 4),
+            "n_victorias": n_metrica_v,
+            "n_derrotas": n_metrica_d,
+            "sentido": sentido,
+        })
+
+    banderas = estadistica.ajustar_fdr([c["p_valor"] for c in comparaciones])
+    for fila, significativa in zip(comparaciones, banderas):
+        fila["significativo"] = significativa
+        d = fila["d_cohen"]
+        if not significativa or d is None or abs(d) < 0.2:
+            fila["como_reportar"] = (
+                "Igual en victorias y derrotas: NO es donde se rompen las "
+                "partidas. Sirve para descartar esta fase como causa."
+            )
+        elif abs(d) < 0.5:
+            fila["como_reportar"] = (
+                "Se derrumba algo en las derrotas, con efecto chico. "
+                "Mencionarla después de las de efecto mayor."
+            )
+        else:
+            fila["como_reportar"] = (
+                "Se derrumba claramente en las derrotas. Es candidata a ser "
+                "donde se rompen, pero NO afirmes que lo causa: los datos no "
+                "distinguen causa de consecuencia."
+            )
+
+    def relevante(c):
+        return c["significativo"] and c["d_cohen"] is not None and abs(c["d_cohen"]) >= 0.2
+
+    se_derrumban = sorted(
+        [c for c in comparaciones if relevante(c)],
+        key=lambda c: abs(c["d_cohen"]), reverse=True,
+    )
+    sin_diferencia = [c["metrica"] for c in comparaciones if not relevante(c)]
+
+    return {
+        "rol": rol,
+        "ventana_dias": days,
+        "victorias": n_v,
+        "derrotas": n_d,
+        "se_derrumban": se_derrumban,
+        "iguales_en_ambas": sin_diferencia,
+        "nota": ("En una derrota casi todo sale peor, así que la sola "
+                 "diferencia no explica nada: lo que informa es el orden por "
+                 "tamaño de efecto y, sobre todo, `iguales_en_ambas`, que "
+                 "descarta fases como causa. Ninguna de estas diferencias "
+                 "prueba causalidad — perder los dragones puede causar la "
+                 "derrota o ser consecuencia de ir perdiendo."),
+    }
+
+
 # Una ganancia así de grande respecto de la típica no se explica por MMR:
 # es el doble de puntos por ganar en rol prioritario (Aegis of Valor).
 FACTOR_BONIFICACION = 1.7
@@ -1117,6 +1326,14 @@ def get_coaching_priorities(
     banderas = estadistica.ajustar_fdr([c["p_valor"] for c in comparaciones])
     for fila, significativa in zip(comparaciones, banderas):
         fila["significativo"] = significativa
+        # El aviso de "esto es una foto" está también en la nota general,
+        # y no alcanzó: el modelo afirmó que una métrica "venía empeorando"
+        # leyendo solo esta comparación, sin haber pedido tendencias. La
+        # prohibición tiene que viajar junto al número, no una capa afuera.
+        sin_tendencia = (
+            " Es una foto del período: NO digas que viene mejorando ni "
+            "empeorando, eso solo lo responde get_trends."
+        )
         d = fila["d_cohen"]
         if not significativa or d is None or abs(d) < 0.2:
             fila["como_reportar"] = (
@@ -1126,10 +1343,12 @@ def get_coaching_priorities(
             fila["como_reportar"] = (
                 "Diferencia real pero de efecto chico: mencionarla con esa "
                 "cautela, sin presentarla como el problema principal."
+                + sin_tendencia
             )
         else:
             fila["como_reportar"] = (
                 "Diferencia real y de efecto relevante: se puede afirmar."
+                + sin_tendencia
             )
 
     def relevante(c):
