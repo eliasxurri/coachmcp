@@ -13,8 +13,8 @@ Every comparison carries a p-value and a three-level verdict — *significant*
 corrected with Benjamini-Hochberg across ~23 simultaneous metrics. Priorities
 are ranked by **Cohen's d, not p-value**: against thousands of peer games
 almost everything comes out significant, so effect size is what identifies
-what matters. The statistics are implemented from scratch in ~230 lines with
-no scipy, validated against closed forms and standard t-tables.
+what matters. The statistics are implemented from scratch in ~240 lines with
+no scipy — validated against closed forms and standard t-tables.
 
 **A peer baseline without a global database.** The other nine players in
 every match are matchmade at the same MMR, so they are a free same-elo
