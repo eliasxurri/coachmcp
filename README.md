@@ -1,5 +1,59 @@
 # Pipeline de datos de League of Legends en AWS
 
+> **English summary.** The rest of this document is in Spanish; this section
+> covers the design and the findings.
+
+A serverless pipeline that ingests League of Legends matches from the Riot
+API into an S3 data lake, and exposes the analysis to a conversational
+assistant through a remote **MCP server** you connect by pasting a URL.
+
+**What makes it more than a dashboard** is that it refuses to report noise.
+Every comparison carries a p-value and a three-level verdict — *significant*
+/ *hint* / *noise* — using Welch's t-test and a two-proportion z-test,
+corrected with Benjamini-Hochberg across ~23 simultaneous metrics. Priorities
+are ranked by **Cohen's d, not p-value**: against thousands of peer games
+almost everything comes out significant, so effect size is what identifies
+what matters. The statistics are implemented from scratch in ~230 lines with
+no scipy, validated against closed forms and standard t-tables.
+
+**A peer baseline without a global database.** The other nine players in
+every match are matchmade at the same MMR, so they are a free same-elo
+reference — 6,468 rows from ~5,200 distinct players, derived from the user's
+own matches. It removes the fixed cost that a global stats database implies.
+
+**Architecture.** Three Lambdas (match ingestion, timeline download, curation)
+on EventBridge schedules, writing JSON to S3 and projecting it to Parquet with
+Athena `INSERT INTO`. 825 MB of raw JSON becomes 1.4 MB of Parquet: the same
+champion-winrate query scans 75 MB against raw and 2.5 KB against the curated
+layer. Two Athena workgroups keep a 100 MB guardrail on the interactive path
+while ETL gets 5 GB. Everything runs at roughly **$0.05/month**.
+
+**What it found**, on 800 matches from one Master-tier account:
+
+- Comparing wins against losses, what collapses is objectives — towers
+  (Cohen's d = 1.62), dragons (1.26), objective damage (1.25) — while kill
+  participation is **0.495 in wins vs 0.522 in losses**, ruling out the
+  advice that generic coaching converges on.
+- A 2.8-point winrate drop over 30 days came back at **p = 0.71**: noise a
+  dashboard would have reported as a slump.
+- Patch nerfs to a main champion were confirmed against Data Dragon, but
+  testing all 18 patches with ≥10 games and correcting for multiple
+  comparisons showed **none** was significantly different.
+
+**Guardrails against the assistant overclaiming.** Every metric ships a
+`como_reportar` field stating what may be said about it, because the same
+warning in a docstring did not stop the model from asserting a *hint* as
+fact — guidance has to travel next to the number. The MCP `instructions`
+declare what the server cannot do, after the model invented an API
+limitation to explain a missing tool.
+
+**Layout:** `terraform/` (infrastructure, remote state in S3), `lambda*/`
+(ingestion, timelines, curation), `mcp-server/` (11 MCP tools + statistics),
+`tests/` (47 tests), `queries.sql` (15 documented Athena queries),
+[`ANALISIS.md`](ANALISIS.md) (findings with their limitations).
+
+---
+
 Pipeline serverless que ingiere partidas desde la API de Riot Games hacia
 un data lake en S3, consultable con SQL vía Athena. Toda la infraestructura
 está definida en Terraform.
