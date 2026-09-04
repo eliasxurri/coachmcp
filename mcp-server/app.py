@@ -89,8 +89,17 @@ def registrar_uso(token: str) -> None:
 
 @mcp.custom_route("/salud", ["GET"])
 async def salud(request):
-    """Verificación sin autenticar, para comprobar que la Lambda responde."""
-    return JSONResponse({"estado": "ok"})
+    """Verificación sin autenticar, para comprobar que la Lambda responde.
+
+    Devuelve además el enlace al código fuente: la AGPL exige que quien
+    ofrezca el programa por red le dé a sus usuarios la forma de obtenerlo,
+    y este es el único endpoint que se puede consultar sin token.
+    """
+    return JSONResponse({
+        "estado": "ok",
+        "licencia": "AGPL-3.0-or-later",
+        "fuente": "https://github.com/eliasxurri/coachmcp",
+    })
 
 
 # El SDK valida el header Host contra una lista blanca para frenar ataques

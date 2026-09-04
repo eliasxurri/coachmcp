@@ -52,6 +52,10 @@ limitation to explain a missing tool.
 `tests/` (47 tests), `queries.sql` (15 documented Athena queries),
 [`ANALISIS.md`](ANALISIS.md) (findings with their limitations).
 
+**License:** AGPL-3.0-or-later. Deploy it on your own AWS account with your
+own Riot API key; if you offer it to others over a network, the source of
+your version has to be available to them too.
+
 ### El conector en uso
 
 ![Conversación en Claude.ai: ante la pregunta de dónde se rompen sus derrotas, el asistente descarta la fase temprana y las peleas porque esas métricas son estadísticamente indistinguibles entre victorias y derrotas, y señala la conversión de objetivos, listando los cinco efectos más grandes con su d de Cohen.](docs/conector-en-claude.png)
@@ -1210,3 +1214,19 @@ admite en los conectores personalizados.
 - **Contrastar el baseline de pares contra el tier declarado.** Ya se
   ingiere el rango; falta usarlo para verificar que los pares de cada
   partida están efectivamente en el mismo rango que el jugador.
+
+---
+
+## Licencia
+
+[AGPL-3.0-or-later](LICENSE).
+
+Se eligió la AGPL y no la MIT por lo que el proyecto es: un servicio que se
+consume por red. La MIT permitiría que alguien lo hospede como producto
+cerrado sin devolver nada; la AGPL exige que quien lo ofrezca a terceros
+publique también su versión del código.
+
+Para quien lo despliega en su propia cuenta y lo usa para sus propias
+partidas —el caso normal— la licencia no impone ninguna obligación
+adicional. El endpoint `/salud` publica el enlace al fuente, que es la forma
+en que un servicio ofrecido por red cumple la cláusula 13.
